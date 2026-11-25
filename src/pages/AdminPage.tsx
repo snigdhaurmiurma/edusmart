@@ -229,35 +229,35 @@ export const AdminPage: React.FC<AdminPageProps> = ({
             </div>
           )}
 
-          {/* Top 4 KPI Cards — matching Figma Admin Panel Blue/Green/Magenta/Orange badges */}
+          {/* Top 4 KPI Cards — live database metrics */}
           <div className="kpi-grid">
             <div className="kpi-card">
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div>
                   <div style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>Total Users</div>
                   <div style={{ fontSize: "1.8rem", fontWeight: 800, marginTop: 2 }}>
-                    {overview?.kpis.total_users ?? 2450}
+                    {overview?.kpis.total_users ?? 0}
                   </div>
                 </div>
                 <div className="kpi-circle-icon" style={{ background: "#2563eb" }}><Users size={19} /></div>
               </div>
               <div style={{ marginTop: 10, fontSize: "0.8rem", color: "#16a34a", fontWeight: 700 }}>
-                ↑ {overview?.kpis.total_users_delta ?? "+12.5%"} <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>vs last month</span>
+                {overview?.kpis.total_users_delta ?? "Live DB"}
               </div>
             </div>
 
             <div className="kpi-card">
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div>
-                  <div style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>Active Students</div>
+                  <div style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>Active Accounts</div>
                   <div style={{ fontSize: "1.8rem", fontWeight: 800, marginTop: 2 }}>
-                    {overview?.kpis.active_users ?? 2100}
+                    {overview?.kpis.active_users ?? 0}
                   </div>
                 </div>
                 <div className="kpi-circle-icon" style={{ background: "#16a34a" }}><Activity size={19} /></div>
               </div>
               <div style={{ marginTop: 10, fontSize: "0.8rem", color: "#16a34a", fontWeight: 700 }}>
-                ↑ {overview?.kpis.active_users_delta ?? "+8.3%"} <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>vs last month</span>
+                {overview?.kpis.active_users_delta ?? "100% active"}
               </div>
             </div>
 
@@ -266,13 +266,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                 <div>
                   <div style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>Active Courses</div>
                   <div style={{ fontSize: "1.8rem", fontWeight: 800, marginTop: 2 }}>
-                    {overview?.kpis.active_courses ?? 145}
+                    {overview?.kpis.active_courses ?? 0}
                   </div>
                 </div>
                 <div className="kpi-circle-icon" style={{ background: "#db2777" }}><BookOpen size={19} /></div>
               </div>
               <div style={{ marginTop: 10, fontSize: "0.8rem", color: "#16a34a", fontWeight: 700 }}>
-                ↑ {overview?.kpis.active_courses_delta ?? "+5.2%"} <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>vs last month</span>
+                {overview?.kpis.active_courses_delta ?? "Enrolled & completed"}
               </div>
             </div>
 
@@ -281,13 +281,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                 <div>
                   <div style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>Open Feedback</div>
                   <div style={{ fontSize: "1.8rem", fontWeight: 800, marginTop: 2 }}>
-                    {overview?.kpis.open_feedback ?? 23}
+                    {overview?.kpis.open_feedback ?? 0}
                   </div>
                 </div>
                 <div className="kpi-circle-icon" style={{ background: "#f97316" }}><MessageSquare size={19} /></div>
               </div>
-              <div style={{ marginTop: 10, fontSize: "0.8rem", color: "#dc2626", fontWeight: 700 }}>
-                ↓ {overview?.kpis.open_feedback_delta ?? "-15.4%"} <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>vs last month</span>
+              <div style={{ marginTop: 10, fontSize: "0.8rem", color: "#ea580c", fontWeight: 700 }}>
+                {overview?.kpis.open_feedback_delta ?? "Awaiting triage"}
               </div>
             </div>
           </div>
