@@ -109,6 +109,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
     role: Mapped[str] = mapped_column(String(24), default="student", nullable=False)
     student_id: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    university_name: Mapped[str] = mapped_column(String(160), default="Global University")
+    lms_platform: Mapped[str] = mapped_column(String(60), default="UCAM / ELMS")
     major: Mapped[str] = mapped_column(String(120), default="Computer Science & Engineering")
     trimester: Mapped[str] = mapped_column(String(60), default="Current Term")
     credits_completed: Mapped[int] = mapped_column(Integer, default=0)
@@ -393,6 +395,8 @@ class RegisterRequest(BaseModel):
     email: str = Field(min_length=5, max_length=180)
     password: str = Field(min_length=8, max_length=128)
     student_id: str | None = None
+    university_name: str = "My University"
+    lms_platform: str = "Manual / Universal"
     major: str = "Computer Science & Engineering"
 
 
@@ -413,6 +417,8 @@ class ChangePasswordRequest(BaseModel):
 class ProfileUpdateRequest(BaseModel):
     full_name: str | None = None
     student_id: str | None = None
+    university_name: str | None = None
+    lms_platform: str | None = None
     major: str | None = None
     trimester: str | None = None
     credits_completed: int | None = None
@@ -431,6 +437,8 @@ class UserPublic(BaseModel):
     email: str
     role: str
     student_id: str | None
+    university_name: str
+    lms_platform: str
     major: str
     trimester: str
     credits_completed: int
@@ -464,6 +472,24 @@ class ChatRequest(BaseModel):
 class PublicRagDemoRequest(BaseModel):
     query: str = Field(min_length=2, max_length=600)
     bot_type: str = Field(default="uniq", pattern="^(uniq|advisor|research)$")
+    custom_context: str | None = Field(default=None, max_length=5000)
+    university_name: str | None = Field(default=None, max_length=140)
+
+
+class CourseUpdateRequest(BaseModel):
+    title: str | None = None
+    instructor: str | None = None
+    credits: int | None = Field(default=None, ge=1, le=6)
+    schedule: str | None = None
+    status: str | None = Field(default=None, pattern="^(enrolled|completed)$")
+    grade: str | None = None
+
+
+class UniversitySetupRequest(BaseModel):
+    university_name: str = Field(min_length=2, max_length=160)
+    lms_platform: str = Field(default="Manual / Universal", max_length=60)
+    handbook_title: str | None = None
+    handbook_text: str | None = None
 
 
 class PublicSupportRequest(BaseModel):
@@ -1682,15 +1708,62 @@ def health_check():
 # --- Public Landing Page Interactive Endpoints (No Auth Required, Zero PII) ---
 @app.post("/api/public/rag-demo")
 def public_rag_demo(payload: PublicRagDemoRequest, db: Session = Depends(get_db)):
-    """Live Hybrid RAG sandbox for the landing page searching public institutional documents only."""
-    hits, latency_ms, corpus_scanned = retrieve_hybrid(
-        db=db,
-        user_id=None,
-        query=payload.query,
-        bot_type=payload.bot_type,
-        source_scope="institutional",
-        top_k=3,
-    )
+    """Live Hybrid RAG sandbox supporting both built-in docs and any visitor's own university text."""
+    t0 = time.perf_counter()
+    if payload.custom_context and payload.custom_context.strip():
+        custom_chunks = chunk_text(payload.custom_context.strip(), max_chars=380, overlap=50)
+        q_tokens = tokenize(payload.query)
+        q_emb = compute_embedding(payload.query)
+        doc_tokens_list = [tokenize(c) for c in custom_chunks]
+        n_docs = len(custom_chunks)
+        avgdl = sum(len(dt) for dt in doc_tokens_list) / max(n_docs, 1)
+        df: Counter[str] = Counter()
+        for dt in doc_tokens_list:
+            for term in set(dt):
+                df[term] += 1
+
+        uni_title = (payload.university_name or "Your University Document").strip()
+        hits = []
+        for idx, (txt, d_tokens) in enumerate(zip(custom_chunks, doc_tokens_list)):
+            tf = Counter(d_tokens)
+            dl = max(len(d_tokens), 1)
+            bm25 = 0.0
+            for term in q_tokens:
+                if term not in tf:
+                    continue
+                idf = math.log(1.0 + (n_docs - df[term] + 0.5) / (df[term] + 0.5))
+                bm25 += idf * (tf[term] * 2.5) / (tf[term] + 1.5 * (0.25 + 0.75 * (dl / max(avgdl, 1.0))))
+            d_emb = compute_embedding(txt)
+            dense = max(0.0, sum(x * y for x, y in zip(q_emb, d_emb)))
+            bm25_norm = bm25 / (bm25 + 2.0) if bm25 > 0 else 0.0
+            score = round(0.62 * bm25_norm + 0.38 * dense, 4)
+            hits.append(
+                {
+                    "chunk_id": idx + 1,
+                    "title": f"{uni_title} (Chunk {idx + 1})",
+                    "source_type": "custom",
+                    "course_code": "CUSTOM",
+                    "score": max(score, 0.12),
+                    "bm25_score": round(bm25_norm, 3),
+                    "cosine_score": round(dense, 3),
+                    "excerpt": txt[:300].strip(),
+                    "full_text": txt,
+                }
+            )
+        hits.sort(key=lambda x: x["score"], reverse=True)
+        hits = hits[:3]
+        latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        corpus_scanned = n_docs
+    else:
+        hits, latency_ms, corpus_scanned = retrieve_hybrid(
+            db=db,
+            user_id=None,
+            query=payload.query,
+            bot_type=payload.bot_type,
+            source_scope="institutional",
+            top_k=3,
+        )
+
     answer, _chips, provider = generate_chat_reply(db, None, payload.bot_type, payload.query, hits)
     return {
         "answer": answer,
@@ -1737,6 +1810,8 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         password_hash=hash_password(payload.password),
         role="student",
         student_id=payload.student_id or "",
+        university_name=payload.university_name.strip() or "My University",
+        lms_platform=payload.lms_platform.strip() or "Manual / Universal",
         major=payload.major,
     )
     db.add(user)
@@ -2424,6 +2499,18 @@ def add_course(payload: CourseCreateRequest, current_user: User = Depends(get_cu
     return {"id": course.id, "code": course.code, "title": course.title}
 
 
+@app.put("/api/sync/courses/{course_id}")
+def update_course(course_id: int, payload: CourseUpdateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    course = db.query(Course).filter(Course.id == course_id, Course.user_id == current_user.id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found.")
+    for field, val in payload.model_dump(exclude_unset=True).items():
+        setattr(course, field, val)
+    db.commit()
+    db.refresh(course)
+    return {"id": course.id, "code": course.code, "title": course.title, "status": course.status, "grade": course.grade}
+
+
 @app.delete("/api/sync/courses/{course_id}")
 def delete_course(course_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     course = db.query(Course).filter(Course.id == course_id, Course.user_id == current_user.id).first()
@@ -2432,6 +2519,106 @@ def delete_course(course_id: int, current_user: User = Depends(get_current_user)
     db.delete(course)
     db.commit()
     return {"deleted": True}
+
+
+@app.post("/api/sync/university-info")
+def save_university_info(payload: UniversitySetupRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Save any university's info and optionally index its handbook/syllabus straight into personal RAG."""
+    current_user.university_name = payload.university_name.strip()
+    current_user.lms_platform = payload.lms_platform.strip()
+    chunks_indexed = 0
+    if payload.handbook_text and payload.handbook_text.strip():
+        title = (payload.handbook_title or f"{current_user.university_name} — Handbook & Policies").strip()
+        note = Note(
+            user_id=current_user.id,
+            title=title,
+            course_code="UNIVERSITY",
+            tags="university,handbook,policies",
+            content=payload.handbook_text.strip(),
+            summary=summarize_text(payload.handbook_text.strip()),
+            ocr_confidence=1.0,
+            low_confidence_lines_json="[]",
+        )
+        db.add(note)
+        db.commit()
+        db.refresh(note)
+        chunks_indexed = index_note(db, note)
+    else:
+        db.commit()
+    db.refresh(current_user)
+    return {
+        "university_name": current_user.university_name,
+        "lms_platform": current_user.lms_platform,
+        "chunks_indexed": chunks_indexed,
+        "message": (
+            f"Saved {current_user.university_name} ({current_user.lms_platform}) and indexed {chunks_indexed} RAG chunk(s)!"
+            if chunks_indexed
+            else f"Updated your university to {current_user.university_name} ({current_user.lms_platform})."
+        ),
+    }
+
+
+def _parse_ics_datetime(raw: str) -> datetime:
+    val = raw.strip().split(":")[-1].replace("Z", "")
+    for fmt in ("%Y%m%dT%H%M%S", "%Y%m%d"):
+        try:
+            return datetime.strptime(val[: len(fmt.replace("%", "")) + 1], fmt).replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+    try:
+        return datetime.strptime(val[:15], "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+    except Exception:
+        return utcnow() + timedelta(days=1)
+
+
+@app.post("/api/sync/import-ics")
+async def import_ics_calendar(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Universal .ics iCalendar importer supporting Canvas, Moodle, Blackboard, Google Calendar, Outlook, UCAM & ELMS."""
+    raw = (await file.read()).decode("utf-8", errors="replace")
+    blocks = re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", raw, flags=re.DOTALL)
+    imported = 0
+    for block in blocks[:50]:
+        summary_m = re.search(r"SUMMARY[^:]*:(.+)", block)
+        start_m = re.search(r"DTSTART[^:]*:(.+)", block)
+        end_m = re.search(r"DTEND[^:]*:(.+)", block)
+        if not summary_m or not start_m:
+            continue
+        title = summary_m.group(1).strip()
+        st = _parse_ics_datetime(start_m.group(1))
+        en = _parse_ics_datetime(end_m.group(1)) if end_m else st + timedelta(hours=1)
+        if en <= st:
+            en = st + timedelta(hours=1)
+        code_m = re.search(r"\b([A-Z]{2,5}\s?\d{3,4})\b", title)
+        code = code_m.group(1).replace(" ", "") if code_m else "PORTAL"
+        etype = "exam" if any(k in title.lower() for k in ("exam", "midterm", "final", "quiz")) else "assignment"
+        db.add(
+            CalendarEvent(
+                user_id=current_user.id,
+                title=title[:190],
+                event_type=etype,
+                course_code=code,
+                start_time=st,
+                end_time=en,
+                priority="high" if etype == "exam" else "medium",
+                source="ics-import",
+            )
+        )
+        imported += 1
+
+    log = SyncLog(
+        user_id=current_user.id,
+        provider="ics",
+        status="success",
+        items_synced=imported,
+        message=f"Imported {imported} event(s) from {file.filename or 'calendar.ics'}.",
+    )
+    db.add(log)
+    db.commit()
+    return {"imported": imported, "message": log.message}
 
 
 @app.post("/api/sync/assignments", status_code=status.HTTP_201_CREATED)

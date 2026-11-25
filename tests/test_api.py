@@ -120,3 +120,48 @@ def test_notes_ocr_pdf_custom_quiz_calendar_routine_assignments_and_admin():
     pub = client.post("/api/admin/content", headers=admin_headers, json={"title": "Lab Hours", "category": "policy", "content": "Computer labs stay open until 10 PM daily."})
     assert pub.status_code == 201
     assert client.delete(f"/api/admin/content/{pub.json()['id']}", headers=admin_headers).status_code == 200
+
+
+def test_universal_university_setup_custom_rag_and_ics_import():
+    # Custom university RAG demo on landing page
+    custom_rag = client.post(
+        "/api/public/rag-demo",
+        json={
+            "query": "What is the withdrawal deadline?",
+            "bot_type": "uniq",
+            "university_name": "Oxford Test College",
+            "custom_context": "At Oxford Test College, midterm course withdrawal closes on Week 7 Friday and labs require 85% attendance.",
+        },
+    )
+    assert custom_rag.status_code == 200
+    assert "Week 7" in custom_rag.json()["answer"]
+
+    headers = _login("student@edusmart.edu", "Student@123")
+
+    # Save custom university info & index handbook into personal RAG
+    uni = client.post(
+        "/api/sync/university-info",
+        headers=headers,
+        json={
+            "university_name": "Global Tech University",
+            "lms_platform": "Canvas LMS",
+            "handbook_title": "GTU Grading Rules",
+            "handbook_text": "Dean's Honor Roll at Global Tech University requires GPA 3.80 with zero incomplete grades.",
+        },
+    )
+    assert uni.status_code == 200
+    assert uni.json()["chunks_indexed"] >= 1
+
+    # Universal .ics calendar import
+    ics_bytes = (
+        "BEGIN:VCALENDAR\r\n"
+        "BEGIN:VEVENT\r\n"
+        "SUMMARY:CS202 Systems Midterm Exam\r\n"
+        "DTSTART:20261220T100000Z\r\n"
+        "DTEND:20261220T120000Z\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    ).encode("utf-8")
+    imp = client.post("/api/sync/import-ics", headers=headers, files={"file": ("canvas.ics", ics_bytes, "text/calendar")})
+    assert imp.status_code == 200
+    assert imp.json()["imported"] == 1

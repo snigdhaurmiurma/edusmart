@@ -121,7 +121,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ user, searchQuery,
       <div style={{ marginBottom: 24 }}>
         <h1 style={{ fontSize: "2rem", fontWeight: 800 }}>Hi {firstName}, here&apos;s your day.</h1>
         <p style={{ color: "var(--text-muted)", margin: "4px 0 0", fontSize: "0.92rem" }}>
-          {todayFormatted} • {user.major}
+          {todayFormatted} • {user.university_name} ({user.lms_platform}) • {user.major}
         </p>
       </div>
 

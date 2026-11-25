@@ -11,6 +11,8 @@ interface ProfilePageProps {
 
 export const ProfilePage: React.FC<ProfilePageProps> = ({ user, onUserUpdated }) => {
   const [fullName, setFullName] = useState(user.full_name);
+  const [universityName, setUniversityName] = useState(user.university_name || "My University");
+  const [lmsPlatform, setLmsPlatform] = useState(user.lms_platform || "Manual / Universal");
   const [studentId, setStudentId] = useState(user.student_id || "");
   const [major, setMajor] = useState(user.major);
   const [trimester, setTrimester] = useState(user.trimester);
@@ -36,6 +38,8 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({ user, onUserUpdated })
         method: "PUT",
         body: JSON.stringify({
           full_name: fullName,
+          university_name: universityName,
+          lms_platform: lmsPlatform,
           student_id: studentId,
           major,
           trimester,
@@ -90,6 +94,20 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({ user, onUserUpdated })
           <form onSubmit={handleSave} className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <h3 style={{ fontSize: "1.08rem" }}>Academic Profile</h3>
             <div><label style={{ display: "block", fontSize: "0.82rem", fontWeight: 700, marginBottom: 4 }}>Full Name</label><input className="input" value={fullName} onChange={(e) => setFullName(e.target.value)} /></div>
+            <div className="grid-2">
+              <div><label style={{ display: "block", fontSize: "0.82rem", fontWeight: 700, marginBottom: 4 }}>University Name</label><input className="input" value={universityName} onChange={(e) => setUniversityName(e.target.value)} /></div>
+              <div>
+                <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 700, marginBottom: 4 }}>Campus Portal / LMS</label>
+                <select className="select" value={lmsPlatform} onChange={(e) => setLmsPlatform(e.target.value)}>
+                  <option value="Manual / Universal">Manual / Universal</option>
+                  <option value="UCAM / ELMS">UCAM / ELMS</option>
+                  <option value="Canvas LMS">Canvas LMS</option>
+                  <option value="Moodle">Moodle</option>
+                  <option value="Blackboard">Blackboard</option>
+                  <option value="Google Classroom">Google Classroom</option>
+                </select>
+              </div>
+            </div>
             <div><label style={{ display: "block", fontSize: "0.82rem", fontWeight: 700, marginBottom: 4 }}>Student ID</label><input className="input" value={studentId} onChange={(e) => setStudentId(e.target.value)} /></div>
             <div><label style={{ display: "block", fontSize: "0.82rem", fontWeight: 700, marginBottom: 4 }}>Major / Department</label><input className="input" value={major} onChange={(e) => setMajor(e.target.value)} /></div>
             <div className="grid-2">

@@ -17,15 +17,21 @@ import { RoutinePage } from "./pages/RoutinePage";
 import { SyncPage } from "./pages/SyncPage";
 import type { AppRoute, User } from "./types";
 
+const THEME_KEY = "edusmart_theme";
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [route, setRoute] = useState<AppRoute>("landing");
-  const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    const saved = localStorage.getItem(THEME_KEY);
+    return saved === "dark" ? "dark" : "light";
+  });
   const [searchQuery, setSearchQuery] = useState("");
   const [demoLoading, setDemoLoading] = useState(false);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
 
   useEffect(() => {
@@ -72,13 +78,22 @@ export default function App() {
 
   if (!user) {
     if (route === "auth") {
-      return <AuthPage onAuthSuccess={handleAuthSuccess} onBackToLanding={() => setRoute("landing")} />;
+      return (
+        <AuthPage
+          onAuthSuccess={handleAuthSuccess}
+          onBackToLanding={() => setRoute("landing")}
+          theme={theme}
+          onToggleTheme={toggleTheme}
+        />
+      );
     }
     return (
       <LandingPage
         onStart={() => setRoute("auth")}
         onWatchDemo={handleWatchDemo}
         demoLoading={demoLoading}
+        theme={theme}
+        onToggleTheme={toggleTheme}
       />
     );
   }
@@ -114,7 +129,7 @@ export default function App() {
       {route === "quizzes" && <QuizPage />}
       {route === "calendar" && <CalendarPage />}
       {route === "routine" && <RoutinePage />}
-      {route === "sync" && <SyncPage />}
+      {route === "sync" && <SyncPage user={user} onUserUpdated={setUser} />}
       {route === "analytics" && <AnalyticsPage />}
       {route === "feedback" && <FeedbackPage />}
       {route === "profile" && <ProfilePage user={user} onUserUpdated={setUser} />}

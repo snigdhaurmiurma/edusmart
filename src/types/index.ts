@@ -4,6 +4,8 @@ export interface User {
   email: string;
   role: "student" | "admin";
   student_id: string | null;
+  university_name: string;
+  lms_platform: string;
   major: string;
   trimester: string;
   credits_completed: number;
