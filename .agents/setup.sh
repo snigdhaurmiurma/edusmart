@@ -28,6 +28,10 @@ if [ -f "package.json" ]; then
   fi
 fi
 
+if [ -f "frontend/package.json" ]; then
+  npm --prefix frontend install --no-audit --no-fund
+fi
+
 if [ -f "pubspec.yaml" ] && command -v flutter >/dev/null 2>&1; then
   flutter pub get
 fi
