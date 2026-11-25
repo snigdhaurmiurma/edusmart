@@ -1,16 +1,18 @@
 """
 EduSmart — Unified Single-File FastAPI Backend (Local & Vercel Serverless Ready).
 
-Covers:
-- Auth, PBKDF2-SHA256 hashing, JWT sessions, account lockout, RBAC, consent & GDPR export
-- Hybrid RAG (BM25 + dense cosine similarity) with strict pre-ranking tenant isolation & cascade purge
-- Provider-agnostic AI chat adapter (OpenAI / Gemini / built-in grounded Hybrid RAG) + SSE streaming
-- Handwritten Notes Digitizer (TXT/MD/PDF/Image OCR, confidence flags, pure-Python PDF/MD/TXT export)
-- AI Quiz Generator & automated grading with topic mastery tracking
-- Smart Academic Calendar with overlap conflict detection, 1-click auto-resolution & .ics export
-- Intelligent Routine Generator & streak tracking
-- Real Courses management + UCAM/ELMS institutional sync
-- Student Analytics & CSV export, Community Feedback & upvoting, Notification Center, and RBAC Admin Console
+Features:
+- Auth (PBKDF2-SHA256, JWT, lockout, password change, RBAC, consent toggles, GDPR JSON export)
+- Hybrid RAG Engine (BM25 + dense cosine similarity, strict pre-ranking tenant isolation,
+  sentence-level extractive grounding, per-chunk BM25/Cosine telemetry, cascade vector purge)
+- Provider-agnostic AI adapter (OpenAI / Gemini / built-in grounded Hybrid RAG) + SSE streaming
+- Public Live RAG Demo & Support endpoints for the interactive landing page
+- Handwritten Notes Digitizer (drag-drop OCR, low-confidence flags, pure-Python PDF/MD/TXT export)
+- AI Quiz Generator (from digitized notes, pasted text, or course bank) & automated grading
+- Smart Academic Calendar (conflict detection, 1-click auto-resolve, .ics export)
+- Intelligent Routine Generator (custom blocks, preferences, push-to-calendar sync)
+- Courses & Assignments management + UCAM/ELMS sync
+- Student Analytics (real live DB metrics + CSV export), Feedback Board, Notifications, and RBAC Admin Console
 """
 
 from collections import Counter
@@ -44,7 +46,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, rela
 # Configuration & Database Setup
 # =============================================================================
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.2.0"
 JWT_SECRET = os.environ.get("JWT_SECRET", "edusmart-jwt-secret-key-change-in-production")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 720
@@ -208,6 +210,7 @@ class ChatMessage(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     citations_json: Mapped[str] = mapped_column(Text, default="[]")
     action_chips_json: Mapped[str] = mapped_column(Text, default="[]")
+    rag_meta_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
@@ -302,7 +305,7 @@ class Assignment(Base):
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="pending")
-    source: Mapped[str] = mapped_column(String(24), default="elms")
+    source: Mapped[str] = mapped_column(String(24), default="manual")
     external_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
@@ -402,6 +405,11 @@ class ResetPasswordRequest(BaseModel):
     email: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class ProfileUpdateRequest(BaseModel):
     full_name: str | None = None
     student_id: str | None = None
@@ -450,6 +458,18 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     session_id: int | None = None
     use_personal_notes: bool = True
+    source_scope: str = Field(default="all", pattern="^(all|personal|institutional)$")
+
+
+class PublicRagDemoRequest(BaseModel):
+    query: str = Field(min_length=2, max_length=600)
+    bot_type: str = Field(default="uniq", pattern="^(uniq|advisor|research)$")
+
+
+class PublicSupportRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    email: str = Field(min_length=5, max_length=180)
+    message: str = Field(min_length=5, max_length=1500)
 
 
 class NoteCreateRequest(BaseModel):
@@ -468,6 +488,7 @@ class NoteUpdateRequest(BaseModel):
 
 class QuizGenerateRequest(BaseModel):
     note_id: int | None = None
+    custom_text: str | None = None
     topic: str | None = None
     course_code: str = "GENERAL"
     num_questions: int = Field(default=5, ge=2, le=10)
@@ -509,6 +530,16 @@ class RoutineGenerateRequest(BaseModel):
     study_hours_target: int = Field(default=4, ge=1, le=10)
 
 
+class RoutineBlockCreateRequest(BaseModel):
+    period: str = Field(default="morning", pattern="^(morning|afternoon|evening)$")
+    start_label: str = Field(min_length=3, max_length=16)
+    end_label: str = Field(min_length=3, max_length=16)
+    title: str = Field(min_length=2, max_length=200)
+    course_code: str = "GENERAL"
+    category: str = "study"
+    priority: str = "medium"
+
+
 class CourseCreateRequest(BaseModel):
     code: str = Field(min_length=2, max_length=40)
     title: str = Field(min_length=2, max_length=200)
@@ -517,6 +548,12 @@ class CourseCreateRequest(BaseModel):
     schedule: str = "Mon/Wed 10:00 AM"
     status: str = Field(default="enrolled", pattern="^(enrolled|completed)$")
     grade: str | None = None
+
+
+class AssignmentCreateRequest(BaseModel):
+    course_code: str = Field(min_length=2, max_length=40)
+    title: str = Field(min_length=2, max_length=200)
+    due_at: datetime
 
 
 class FeedbackCreateRequest(BaseModel):
@@ -637,12 +674,13 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 # Hybrid RAG Engine (BM25 + Dense Cosine + Pre-Ranking Tenant Isolation)
 # =============================================================================
 
-EMBEDDING_DIM = 96
+EMBEDDING_DIM = 128
 STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "he",
     "in", "is", "it", "its", "of", "on", "that", "the", "to", "was", "were",
     "will", "with", "this", "what", "how", "can", "i", "my", "me", "do", "does",
-    "should", "about", "you", "your", "or", "we", "our", "they", "their",
+    "should", "about", "you", "your", "or", "we", "our", "they", "their", "tell",
+    "explain", "please", "give", "help",
 }
 
 
@@ -666,7 +704,7 @@ def compute_embedding(text: str, dim: int = EMBEDDING_DIM) -> list[float]:
     return [round(v / norm, 5) for v in vec] if norm > 0 else vec
 
 
-def chunk_text(text: str, max_chars: int = 420, overlap: int = 60) -> list[str]:
+def chunk_text(text: str, max_chars: int = 440, overlap: int = 70) -> list[str]:
     paragraphs = [p.strip() for p in re.split(r"\n{2,}", text.strip()) if p.strip()]
     chunks: list[str] = []
     current = ""
@@ -743,30 +781,37 @@ def index_institutional_doc(db: Session, doc: InstitutionalDoc) -> int:
 
 def retrieve_hybrid(
     db: Session,
-    user_id: int,
+    user_id: int | None,
     query: str,
     bot_type: str = "uniq",
-    include_personal_notes: bool = True,
+    source_scope: str = "all",
     top_k: int = 4,
-) -> tuple[list[dict[str, Any]], float]:
+) -> tuple[list[dict[str, Any]], float, int]:
+    """
+    Hybrid BM25 + dense cosine retrieval with strict pre-ranking tenant isolation.
+    Returns (hits, latency_ms, corpus_scanned_count).
+    """
     t0 = time.perf_counter()
-    if include_personal_notes:
+
+    if user_id is None or source_scope == "institutional":
+        candidates = db.query(RagChunk).filter(RagChunk.tenant_user_id.is_(None)).all()
+    elif source_scope == "personal":
+        candidates = db.query(RagChunk).filter(RagChunk.tenant_user_id == user_id).all()
+    else:
         candidates = (
             db.query(RagChunk)
             .filter(or_(RagChunk.tenant_user_id.is_(None), RagChunk.tenant_user_id == user_id))
             .all()
         )
-    else:
-        candidates = db.query(RagChunk).filter(RagChunk.tenant_user_id.is_(None)).all()
 
+    corpus_count = len(candidates)
     if not candidates:
-        return [], round((time.perf_counter() - t0) * 1000.0, 2)
+        return [], round((time.perf_counter() - t0) * 1000.0, 2), 0
 
     q_tokens = tokenize(query)
     q_emb = compute_embedding(query)
     doc_tokens_list = [tokenize(c.chunk_text) for c in candidates]
-    n_docs = len(candidates)
-    avgdl = sum(len(dt) for dt in doc_tokens_list) / max(n_docs, 1)
+    avgdl = sum(len(dt) for dt in doc_tokens_list) / max(corpus_count, 1)
     df: Counter[str] = Counter()
     for dt in doc_tokens_list:
         for term in set(dt):
@@ -780,16 +825,16 @@ def retrieve_hybrid(
         for term in q_tokens:
             if term not in tf:
                 continue
-            idf = math.log(1.0 + (n_docs - df[term] + 0.5) / (df[term] + 0.5))
+            idf = math.log(1.0 + (corpus_count - df[term] + 0.5) / (df[term] + 0.5))
             bm25 += idf * (tf[term] * 2.5) / (tf[term] + 1.5 * (0.25 + 0.75 * (dl / max(avgdl, 1.0))))
         try:
             d_emb = json.loads(chunk.embedding_json)
             dense = max(0.0, sum(x * y for x, y in zip(q_emb, d_emb)))
         except Exception:
             dense = 0.0
-        bm25_norm = bm25 / (bm25 + 2.5) if bm25 > 0 else 0.0
+        bm25_norm = bm25 / (bm25 + 2.2) if bm25 > 0 else 0.0
         hybrid_score = round(0.62 * bm25_norm + 0.38 * dense, 4)
-        if hybrid_score >= 0.08:
+        if hybrid_score >= 0.07:
             scored.append(
                 {
                     "chunk_id": chunk.id,
@@ -797,7 +842,9 @@ def retrieve_hybrid(
                     "source_type": chunk.source_type,
                     "course_code": chunk.course_code,
                     "score": hybrid_score,
-                    "excerpt": chunk.chunk_text[:280].strip(),
+                    "bm25_score": round(bm25_norm, 3),
+                    "cosine_score": round(dense, 3),
+                    "excerpt": chunk.chunk_text[:300].strip(),
                     "full_text": chunk.chunk_text,
                 }
             )
@@ -813,23 +860,48 @@ def retrieve_hybrid(
             query_preview=query[:150],
             retrieval_k=top_k,
             hits_count=len(hits),
-            hit_at_1=bool(hits and hits[0]["score"] >= 0.18),
+            hit_at_1=bool(hits and hits[0]["score"] >= 0.16),
             latency_ms=latency_ms,
             provider="local-hybrid-rag",
         )
     )
     db.commit()
-    return hits, latency_ms
+    return hits, latency_ms, corpus_count
+
+
+def _extract_relevant_sentences(query: str, hits: list[dict[str, Any]], max_sentences: int = 5) -> list[tuple[str, str, str]]:
+    """Sentence-level extractive RAG synthesis: selects the highest-overlap sentences with citations."""
+    q_tokens = set(tokenize(query))
+    q_emb = compute_embedding(query)
+    scored_sents: list[tuple[float, str, str, str]] = []
+    seen = set()
+
+    for h in hits:
+        raw_lines = [ln.strip() for ln in re.split(r"(?<=[.!?])\s+|\n+", h["full_text"]) if len(ln.strip()) > 20]
+        for sent in raw_lines:
+            cleaned = re.sub(r"^[-*#\s]+", "", sent).strip()
+            if len(cleaned) < 18 or cleaned.lower() in seen:
+                continue
+            seen.add(cleaned.lower())
+            s_tokens = set(tokenize(cleaned))
+            overlap = len(q_tokens & s_tokens) / max(len(q_tokens), 1) if q_tokens else 0.0
+            s_emb = compute_embedding(cleaned)
+            cos = max(0.0, sum(x * y for x, y in zip(q_emb, s_emb)))
+            rank = 0.55 * overlap + 0.30 * cos + 0.15 * h["score"]
+            scored_sents.append((rank, cleaned, h["title"], h["course_code"]))
+
+    scored_sents.sort(key=lambda x: x[0], reverse=True)
+    return [(s, title, code) for _, s, title, code in scored_sents[:max_sentences]]
 
 
 # =============================================================================
-# AI Adapter (OpenAI / Gemini / Grounded Hybrid RAG)
+# AI Adapter (OpenAI / Gemini / Sentence-Grounded Hybrid RAG)
 # =============================================================================
 
 BOT_PROMPTS = {
-    "uniq": "You are UNIQ, EduSmart's personalized academic assistant. Ground every answer in the retrieved notes, schedule, and institutional policies with [Title] citations.",
-    "advisor": "You are EduSmart's Academic Advisor Bot. Guide degree planning, prerequisites, credit balance, and graduation timelines based on the student's actual courses.",
-    "research": "You are EduSmart's Research Bot. Provide IEEE search strings, methodology checklists, and formatted citations.",
+    "uniq": "You are UNIQ, EduSmart's RAG-powered academic assistant. Answer strictly from the retrieved student notes, schedule, and institutional policies using [Title] citations.",
+    "advisor": "You are EduSmart's Academic Advisor Bot. Guide degree planning, prerequisites, credit balance, and graduation timelines using retrieved university policies and student courses.",
+    "research": "You are EduSmart's Research Bot. Provide IEEE search strings, methodology checklists, and grounded literature insights from retrieved notes and policies.",
 }
 
 
@@ -846,8 +918,8 @@ def _call_external_llm(system_prompt: str, user_prompt: str) -> tuple[str | None
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt},
                         ],
-                        "temperature": 0.35,
-                        "max_tokens": 650,
+                        "temperature": 0.3,
+                        "max_tokens": 700,
                     },
                 )
                 if r.status_code == 200:
@@ -869,11 +941,12 @@ def _call_external_llm(system_prompt: str, user_prompt: str) -> tuple[str | None
     return None, "local-hybrid-rag"
 
 
-def _build_action_chips(bot_type: str, message: str) -> list[dict[str, Any]]:
+def _build_action_chips(bot_type: str, message: str, hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    top_course = hits[0]["course_code"] if hits else "STUDY"
     if bot_type == "uniq":
         return [
-            {"label": "Schedule Study Session", "action": "add_calendar", "payload": {"title": "UNIQ Guided Study Block", "event_type": "study", "course_code": "STUDY"}},
-            {"label": "Generate Practice Quiz", "action": "generate_quiz", "payload": {"topic": message[:60]}},
+            {"label": "Schedule Study Session", "action": "add_calendar", "payload": {"title": f"Review: {message[:36]}", "event_type": "study", "course_code": top_course}},
+            {"label": "Generate Practice Quiz", "action": "generate_quiz", "payload": {"topic": message[:60], "course_code": top_course}},
             {"label": "Refresh Study Routine", "action": "seed_routine", "payload": {}},
         ]
     if bot_type == "advisor":
@@ -883,106 +956,105 @@ def _build_action_chips(bot_type: str, message: str) -> list[dict[str, Any]]:
             {"label": "Build Balanced Routine", "action": "seed_routine", "payload": {}},
         ]
     return [
-        {"label": "Save Reading Milestone", "action": "add_calendar", "payload": {"title": f"Literature Review: {message[:36]}", "event_type": "study", "course_code": "RESEARCH"}},
+        {"label": "Save Reading Milestone", "action": "add_calendar", "payload": {"title": f"Literature Review: {message[:34]}", "event_type": "study", "course_code": "RESEARCH"}},
         {"label": "Open Notes Digitizer", "action": "open_notes", "payload": {}},
-        {"label": "Quiz on Research Topic", "action": "generate_quiz", "payload": {"topic": message[:60]}},
+        {"label": "Quiz on Topic", "action": "generate_quiz", "payload": {"topic": message[:60], "course_code": top_course}},
     ]
 
 
-def generate_chat_reply(db: Session, user: User, bot_type: str, message: str, hits: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]], str]:
+def generate_chat_reply(
+    db: Session,
+    user: User | None,
+    bot_type: str,
+    message: str,
+    hits: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]], str]:
     context_block = "\n\n".join(f"[{h['title']} | {h['course_code']}]: {h['full_text']}" for h in hits)
-    user_prompt = f"Student: {user.full_name} ({user.major}, {user.trimester})\nContext:\n{context_block or 'None'}\n\nQuestion: {message}"
+    student_label = f"{user.full_name} ({user.major}, {user.trimester})" if user else "Guest Explorer"
+    user_prompt = f"Student: {student_label}\nRetrieved Context:\n{context_block or 'No matching chunks found.'}\n\nQuestion: {message}"
+
     llm_text, provider = _call_external_llm(BOT_PROMPTS[bot_type], user_prompt)
     if llm_text:
-        return llm_text, _build_action_chips(bot_type, message), provider
+        return llm_text, _build_action_chips(bot_type, message, hits), provider
 
+    extracted = _extract_relevant_sentences(message, hits, max_sentences=4)
     upcoming = (
         db.query(CalendarEvent)
         .filter(CalendarEvent.user_id == user.id, CalendarEvent.completed.is_(False), CalendarEvent.start_time >= utcnow())
         .order_by(CalendarEvent.start_time.asc())
         .limit(3)
         .all()
+        if user
+        else []
     )
-    courses = db.query(Course).filter(Course.user_id == user.id).all()
-    attempts = db.query(QuizAttempt).filter(QuizAttempt.user_id == user.id).order_by(QuizAttempt.created_at.desc()).limit(5).all()
+    courses = db.query(Course).filter(Course.user_id == user.id).all() if user else []
+    attempts = db.query(QuizAttempt).filter(QuizAttempt.user_id == user.id).order_by(QuizAttempt.created_at.desc()).limit(5).all() if user else []
 
     if bot_type == "advisor":
         enrolled = [c for c in courses if c.status == "enrolled"]
         completed = [c for c in courses if c.status == "completed"]
-        remaining = max(0, 138 - (user.credits_completed or 0))
-        lines = [
-            f"### Academic Advising Plan for {user.full_name}",
-            f"- **Major:** {user.major} | **Credits Completed:** {user.credits_completed}/138 (~{remaining} remaining)",
-            "",
-        ]
+        remaining = max(0, 138 - (user.credits_completed if user else 0))
+        lines = [f"### Academic Advising Answer ({student_label})"]
+        if extracted:
+            lines.append("")
+            lines.append("**Grounded Institutional & Policy Guidance:**")
+            for sent, title, _code in extracted[:3]:
+                lines.append(f"- {sent} *[{title}]*")
         if enrolled:
-            lines.append("**Currently Enrolled Courses:**")
-            for c in enrolled[:6]:
-                lines.append(f"- `{c.code}` — {c.title} ({c.credits} cr, {c.schedule})")
-        else:
-            lines.append("*No courses added yet — add your courses in Courses & Sync for personalized prerequisite checks.*")
+            lines.append("")
+            lines.append("**Your Enrolled Courses:** " + ", ".join(f"`{c.code}` ({c.title})" for c in enrolled[:5]))
         if completed:
-            lines.append("")
-            lines.append("**Completed Courses:** " + ", ".join(f"`{c.code}` ({c.grade or 'Pass'})" for c in completed[:6]))
-        lines.extend([
-            "",
-            "**Suggested Next-Term Load (12 Credits — Conflict-Free):**",
-            "1. **CSE415 — Distributed Systems** (3 cr)",
-            "2. **CSE442 — Machine Learning Engineering** (3 cr)",
-            "3. **CSE499B — Capstone Design Project II** (3 cr)",
-            "4. **GED310 — Technology Ethics & Governance** (3 cr)",
-        ])
-        if hits:
-            lines.append("")
-            lines.append(f"**Grounded Institutional Reference:** *[{hits[0]['title']}]* {hits[0]['excerpt']}")
-        return "\n".join(lines), _build_action_chips(bot_type, message), "local-hybrid-rag"
+            lines.append("**Completed Prerequisites:** " + ", ".join(f"`{c.code}` ({c.grade or 'Pass'})" for c in completed[:6]))
+        if user:
+            lines.append(f"\n**Degree Progress:** {user.credits_completed}/138 credits completed (~{remaining} credits remaining).")
+        return "\n".join(lines), _build_action_chips(bot_type, message, hits), "local-hybrid-rag"
 
     if bot_type == "research":
-        topic = message.strip().rstrip("?") or "Retrieval-Augmented Generation in Higher Education"
-        lines = [
-            f"### Research Workspace Guide: {topic}",
-            "",
-            "**1. Academic Search Queries**",
-            f'- IEEE Xplore / ACM DL: `("{topic}" OR "academic support") AND ("evaluation" OR "empirical") AND ("university")`',
-            f'- Google Scholar: `allintitle: "{topic}" architecture OR benchmark 2023..2026`',
-            "",
-            "**2. Methodology Checklist**",
-            "- Define measurable research questions and baseline comparisons.",
-            "- Keep training/evaluation splits isolated to avoid data leakage.",
-            "- Report latency, precision@k, and user-study findings clearly.",
-            "",
-            "**3. IEEE Citation Template**",
-            f'> [1] {user.full_name}, "{topic}: Design, Architecture, and Evaluation," *Proc. IEEE Conf. on Educational Systems*, 2026.',
-        ]
-        if hits:
+        topic = message.strip().rstrip("?") or "Retrieval-Augmented Generation in Education"
+        lines = [f"### Research RAG Synthesis: {topic}"]
+        if extracted:
             lines.append("")
-            lines.append(f"**Matched Corpus Note:** *[{hits[0]['title']}]* ({hits[0]['course_code']}): {hits[0]['excerpt']}")
-        return "\n".join(lines), _build_action_chips(bot_type, message), "local-hybrid-rag"
+            lines.append("**Grounded Evidence from Knowledge Base:**")
+            for sent, title, _code in extracted[:3]:
+                lines.append(f"- {sent} *[{title}]*")
+        lines.extend([
+            "",
+            "**Precision Search Strings:**",
+            f'- IEEE Xplore / ACM DL: `("{topic}") AND ("evaluation" OR "empirical" OR "benchmark") AND ("education" OR "university")`',
+            f'- Google Scholar: `allintitle: "{topic}" architecture OR study 2023..2026`',
+            "",
+            "**IEEE Citation Draft:**",
+            f'> [1] {user.full_name if user else "Author"}, "{topic}: System Architecture and Evaluation," *Proc. IEEE Conf. on Educational Technology*, 2026.',
+        ])
+        return "\n".join(lines), _build_action_chips(bot_type, message, hits), "local-hybrid-rag"
 
+    # UNIQ Grounded Hybrid RAG Answer
     lines: list[str] = []
-    if hits:
-        lines.append(f"Based on your knowledge base (**{hits[0]['title']}** — `{hits[0]['course_code']}`):")
+    if extracted:
+        lines.append("**Grounded Answer (Hybrid RAG Retrieval):**")
         lines.append("")
-        for idx, h in enumerate(hits[:3], start=1):
-            label = "Personal Note" if h["source_type"] == "note" else "University Policy / FAQ"
-            lines.append(f"**{idx}. [{h['title']}]** *({label}, match {int(h['score'] * 100)}%)*")
-            lines.append(f"> {h['excerpt']}")
-            lines.append("")
+        for sent, title, code in extracted:
+            lines.append(f"- {sent} *[{title} • {code}]*")
+        lines.append("")
     else:
-        lines.append(f"Hi {user.full_name.split()[0]}, I checked your notes and institutional policies for **\"{message[:80]}\"**.")
+        lines.append(
+            f"I searched your indexed RAG knowledge base for **\"{message[:80]}\"** but found no closely matching document chunks yet. "
+            "Try clicking **+ Add Knowledge Source** above to upload or paste notes on this topic!"
+        )
         lines.append("")
-    if upcoming:
+
+    if upcoming and any(k in message.lower() for k in ("today", "deadline", "upcoming", "exam", "task", "schedule", "plan")):
         lines.append("**Your Upcoming Deadlines:**")
         for ev in upcoming:
             lines.append(f"- **{ev.title}** (`{ev.course_code}` • {ev.event_type}) — {ensure_utc(ev.start_time).strftime('%a, %b %d at %I:%M %p')}")
         lines.append("")
-    if attempts:
+
+    if attempts and any(k in message.lower() for k in ("weak", "score", "quiz", "study", "improve")):
         avg = round(sum(a.score_percent for a in attempts) / len(attempts), 1)
         weakest = min(attempts, key=lambda a: a.score_percent)
-        lines.append(f"**Quiz Insight:** Average score **{avg}%**. Focus extra review on `{weakest.course_code}` ({weakest.score_percent:.0f}%).")
-        lines.append("")
-    lines.append("Use the quick actions below to add a calendar block, generate a quiz, or refresh your routine.")
-    return "\n".join(lines), _build_action_chips(bot_type, message), "local-hybrid-rag"
+        lines.append(f"**Performance Insight:** Average quiz score is **{avg}%**. Prioritize reviewing `{weakest.course_code}` ({weakest.score_percent:.0f}%).")
+
+    return "\n".join(lines).strip(), _build_action_chips(bot_type, message, hits), "local-hybrid-rag"
 
 
 def stream_words(text: str, size: int = 8) -> Iterator[str]:
@@ -993,7 +1065,7 @@ def stream_words(text: str, size: int = 8) -> Iterator[str]:
 
 
 # =============================================================================
-# Pure-Python PDF Export & OCR Digitizer (Zero Native C-Wheel Dependencies)
+# Pure-Python PDF Export & OCR Digitizer
 # =============================================================================
 
 def _pdf_escape(text: str) -> str:
@@ -1002,7 +1074,6 @@ def _pdf_escape(text: str) -> str:
 
 
 def build_simple_pdf(title: str, course_code: str, content: str) -> bytes:
-    """Generate a valid PDF 1.4 document using pure Python stdlib (fast & lightweight on Vercel)."""
     wrapped_lines: list[tuple[str, int]] = [(title, 15), (f"EduSmart Note | Course: {course_code}", 10), ("", 10)]
     for raw_line in content.splitlines():
         line = raw_line.strip()
@@ -1017,7 +1088,6 @@ def build_simple_pdf(title: str, course_code: str, content: str) -> bytes:
             line = line[split_at:].strip()
         wrapped_lines.append((line, 11))
 
-    # Build content stream for page 1 (up to 46 lines per page)
     pages_lines = [wrapped_lines[i : i + 46] for i in range(0, max(len(wrapped_lines), 1), 46)]
     objects: list[bytes] = []
 
@@ -1026,7 +1096,7 @@ def build_simple_pdf(title: str, course_code: str, content: str) -> bytes:
         return len(objects)
 
     font_id = add_obj(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-    pages_placeholder_id = add_obj(b"")  # filled after pages are created
+    pages_placeholder_id = add_obj(b"")
     page_ids: list[int] = []
 
     for page_chunk in pages_lines:
@@ -1086,7 +1156,7 @@ def analyze_confidence(text: str) -> tuple[float, list[dict[str, Any]]]:
                     "line_number": idx,
                     "text": line[:140],
                     "confidence": score,
-                    "suggestion": "Verify handwritten symbols, subscripts, or mathematical notation on this line.",
+                    "suggestion": "Verify handwritten symbols, subscripts, or equations on this line.",
                 }
             )
     return (round(sum(scores) / len(scores), 2) if scores else 0.94), low_conf
@@ -1131,7 +1201,7 @@ def digitize_upload(filename: str, content_bytes: bytes, course_code: str) -> di
 
 
 # =============================================================================
-# Quiz & Routine & Sync Engines
+# Quiz, Routine & Sync Engines
 # =============================================================================
 
 QUESTION_BANK: dict[str, list[dict[str, Any]]] = {
@@ -1209,8 +1279,8 @@ def generate_quiz_questions(source_text: str | None, topic: str | None, course_c
     questions: list[dict[str, Any]] = []
     upper = course_code.upper().strip()
     if source_text:
-        bullets = [re.sub(r"^[-*#\d.)\s]+", "", ln).strip() for ln in source_text.splitlines() if len(ln.strip()) > 32]
-        for line in bullets[: max(2, num_q - 2)]:
+        bullets = [re.sub(r"^[-*#\d.)\s]+", "", ln).strip() for ln in source_text.splitlines() if len(ln.strip()) > 28]
+        for line in bullets[: max(3, num_q - 1)]:
             clean = line.replace("**", "")
             if ":" in clean and len(clean.split(":", 1)[0]) < 48:
                 concept, desc = [p.strip() for p in clean.split(":", 1)]
@@ -1220,7 +1290,7 @@ def generate_quiz_questions(source_text: str | None, topic: str | None, course_c
                         "type": "mcq",
                         "topic": concept[:40],
                         "difficulty": difficulty,
-                        "prompt": f"According to your {upper} notes, which statement accurately describes '{concept}'?",
+                        "prompt": f"According to your {upper} study material, which statement accurately describes '{concept}'?",
                         "options": [
                             desc[:130],
                             "It only applies to unordered linear arrays with no caching.",
@@ -1229,6 +1299,22 @@ def generate_quiz_questions(source_text: str | None, topic: str | None, course_c
                         ],
                         "answer": desc[:130],
                         "explanation": f"Directly grounded in your {upper} note on {concept}.",
+                    }
+                )
+            elif len(questions) < num_q:
+                words = [w.strip(".,;:()") for w in clean.split() if len(w) > 5]
+                kw = words[0] if words else (topic or upper)
+                questions.append(
+                    {
+                        "id": f"q{len(questions) + 1}",
+                        "type": "short",
+                        "topic": (topic or upper)[:40],
+                        "difficulty": difficulty,
+                        "prompt": f"Summarize the key concept involving '{kw}' from your {upper} study material.",
+                        "options": [],
+                        "answer": kw,
+                        "keywords": [w.lower() for w in words[:4]] or [kw.lower()],
+                        "explanation": f"Reference: {clean[:180]}",
                     }
                 )
     bank = QUESTION_BANK.get(upper) or QUESTION_BANK["CSC301"]
@@ -1384,7 +1470,7 @@ def run_university_sync(db: Session, user_id: int, provider: str = "all") -> Syn
 
 
 # =============================================================================
-# Initial Seed (Authentic Starter Workspace — No Screenshot Mock Names)
+# Initial Seed (Authentic Starter Workspace & Public Institutional RAG Corpus)
 # =============================================================================
 
 def seed_initial_data(db: Session) -> None:
@@ -1423,21 +1509,28 @@ def seed_initial_data(db: Session) -> None:
             title="University Merit Scholarship & Tuition Waiver Policy",
             category="policy",
             course_code="POLICY",
-            content="Students maintaining a CGPA of 3.85 or higher with at least 12 credits per term qualify for a 50% tuition waiver; CGPA 3.70-3.84 qualifies for a 25% waiver. Evaluations run automatically via UCAM after grade publication.",
+            content="Students maintaining a CGPA of 3.85 or higher with at least 12 credits per term qualify for a 50% tuition waiver. Students with CGPA 3.70 to 3.84 qualify for a 25% merit waiver. Evaluations run automatically via UCAM within two weeks of grade publication. Need-based financial aid and installment plans are available through Student Affairs.",
             created_by=admin.id,
         ),
         InstitutionalDoc(
-            title="CSE Degree Requirements & Prerequisite Guide",
+            title="CSE Degree Requirements & Prerequisite Chain",
             category="curriculum",
             course_code="CSE",
-            content="The B.Sc. in Computer Science & Engineering requires 138 credits including CSC301 Algorithms, CSE221 Operating Systems, CSE3411 System Analysis & Design, and CSE499 Capstone Project. Students with 105+ credits can take 400-level electives.",
+            content="The B.Sc. in Computer Science & Engineering requires 138 total credits. Core prerequisites include Data Structures before CSC301 Algorithms, Digital Logic before Computer Architecture, and 105+ completed credits before registering for CSE499 Capstone Project and 400-level electives such as Distributed Systems and Machine Learning.",
             created_by=admin.id,
         ),
         InstitutionalDoc(
-            title="Academic Integrity & IEEE Citation Standards",
+            title="Academic Integrity, Exam Deferral & IEEE Citation Guide",
             category="faq",
             course_code="RESEARCH",
-            content="All undergraduate research papers and capstone reports follow IEEE citation formatting. Documented medical exam deferrals must be filed within 72 hours.",
+            content="All undergraduate research papers and CSE499 capstone reports must follow IEEE citation formatting with numbered bracketed references. Students unable to attend a midterm due to documented medical emergencies must submit a makeup exam petition within 72 hours.",
+            created_by=admin.id,
+        ),
+        InstitutionalDoc(
+            title="Algorithms & Dynamic Programming Study Reference",
+            category="curriculum",
+            course_code="CSC301",
+            content="Dynamic Programming requires two core properties: optimal substructure and overlapping subproblems. Top-down memoization uses recursion with a lookup cache, while bottom-up tabulation fills a DP table iteratively. Dijkstra's shortest path runs in O((V + E) log V) with a binary min-heap for graphs with non-negative edge weights.",
             created_by=admin.id,
         ),
     ]
@@ -1462,6 +1555,7 @@ def seed_initial_data(db: Session) -> None:
                 "# CSC301: Dynamic Programming & Graph Algorithms\n\n"
                 "- **Optimal Substructure:** An optimal solution can be constructed from optimal solutions of subproblems.\n"
                 "- **Overlapping Subproblems:** Caching repeated recursive calls prevents exponential recomputation.\n"
+                "- **0/1 Knapsack Recurrence:** dp[i][w] = max(dp[i-1][w], val[i] + dp[i-1][w-wt[i]]) when wt[i] <= w.\n"
                 "- **Dijkstra's Algorithm:** Uses a binary min-heap for O((V + E) log V) shortest paths on non-negative graphs.\n"
                 "- **Master Theorem:** T(n) = 2T(n/2) + O(n) yields O(n log n) under Case 2."
             ),
@@ -1565,7 +1659,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="EduSmart API",
     version=APP_VERSION,
-    description="Unified Full-Stack AI Academic Support Platform",
+    description="Unified Full-Stack AI Academic Support Platform with Hybrid RAG",
     lifespan=lifespan,
 )
 
@@ -1583,6 +1677,51 @@ init_database()
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "service": "edusmart-api", "version": APP_VERSION}
+
+
+# --- Public Landing Page Interactive Endpoints (No Auth Required, Zero PII) ---
+@app.post("/api/public/rag-demo")
+def public_rag_demo(payload: PublicRagDemoRequest, db: Session = Depends(get_db)):
+    """Live Hybrid RAG sandbox for the landing page searching public institutional documents only."""
+    hits, latency_ms, corpus_scanned = retrieve_hybrid(
+        db=db,
+        user_id=None,
+        query=payload.query,
+        bot_type=payload.bot_type,
+        source_scope="institutional",
+        top_k=3,
+    )
+    answer, _chips, provider = generate_chat_reply(db, None, payload.bot_type, payload.query, hits)
+    return {
+        "answer": answer,
+        "provider": provider,
+        "latency_ms": latency_ms,
+        "corpus_chunks_scanned": corpus_scanned,
+        "citations": [
+            {
+                "chunk_id": h["chunk_id"],
+                "title": h["title"],
+                "course_code": h["course_code"],
+                "score": h["score"],
+                "bm25_score": h["bm25_score"],
+                "cosine_score": h["cosine_score"],
+                "excerpt": h["excerpt"],
+            }
+            for h in hits
+        ],
+    }
+
+
+@app.post("/api/public/support")
+def public_support_contact(payload: PublicSupportRequest, db: Session = Depends(get_db)):
+    record_audit(
+        db,
+        action="support.inquiry_received",
+        actor_email=payload.email.strip().lower(),
+        target=payload.name.strip(),
+        details=payload.message.strip()[:240],
+    )
+    return {"status": "received", "message": f"Thanks {payload.name.strip()}! Your support message has been logged."}
 
 
 # --- Auth & Profile ---
@@ -1607,7 +1746,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         Notification(
             user_id=user.id,
             title=f"Welcome to EduSmart, {user.full_name.split()[0]}!",
-            message="Start by adding your courses, uploading lecture notes, or asking UNIQ AI.",
+            message="Start by adding your courses, uploading lecture notes into RAG, or asking UNIQ AI.",
             category="system",
             action_route="dashboard",
         )
@@ -1650,6 +1789,17 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
     return {"status": "sent", "message": "If an account exists for this email, a time-limited reset link has been sent."}
 
 
+@app.post("/api/auth/change-password")
+def change_password(payload: ChangePasswordRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not verify_password(payload.current_password, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+    validate_password_strength(payload.new_password)
+    current_user.password_hash = hash_password(payload.new_password)
+    db.commit()
+    record_audit(db, action="auth.password_changed", actor=current_user, target=current_user.email)
+    return {"status": "updated", "message": "Password updated successfully."}
+
+
 @app.get("/api/auth/me", response_model=UserPublic)
 def get_me(current_user: User = Depends(get_current_user)):
     return UserPublic.model_validate(current_user)
@@ -1680,7 +1830,7 @@ def gdpr_export(current_user: User = Depends(get_current_user), db: Session = De
     }
 
 
-# --- Chat & Hybrid RAG ---
+# --- Chat & Hybrid RAG Inspector ---
 def _serialize_msg(m: ChatMessage) -> dict:
     return {
         "id": m.id,
@@ -1688,6 +1838,7 @@ def _serialize_msg(m: ChatMessage) -> dict:
         "content": m.content,
         "citations": json.loads(m.citations_json or "[]"),
         "action_chips": json.loads(m.action_chips_json or "[]"),
+        "rag_meta": json.loads(m.rag_meta_json or "{}"),
         "created_at": m.created_at.isoformat(),
     }
 
@@ -1704,6 +1855,26 @@ def _get_or_create_session(db: Session, user: User, bot_type: str, session_id: i
     return sess
 
 
+@app.get("/api/rag/index")
+def inspect_rag_index(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Return all RAG chunks accessible to the current student (tenant-isolated)."""
+    personal = db.query(RagChunk).filter(RagChunk.tenant_user_id == current_user.id).order_by(RagChunk.created_at.desc()).all()
+    institutional = db.query(RagChunk).filter(RagChunk.tenant_user_id.is_(None)).order_by(RagChunk.created_at.desc()).all()
+    return {
+        "personal_chunks_count": len(personal),
+        "institutional_chunks_count": len(institutional),
+        "consent_personal_enabled": current_user.consent_rag_personal,
+        "personal_sources": [
+            {"chunk_id": c.id, "note_id": c.note_id, "title": c.title, "course_code": c.course_code, "chunk_index": c.chunk_index, "preview": c.chunk_text[:180]}
+            for c in personal[:25]
+        ],
+        "institutional_sources": [
+            {"chunk_id": c.id, "title": c.title, "course_code": c.course_code, "chunk_index": c.chunk_index, "preview": c.chunk_text[:180]}
+            for c in institutional[:25]
+        ],
+    }
+
+
 @app.get("/api/chat/sessions")
 def list_sessions(bot_type: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(ChatSession).filter(ChatSession.user_id == current_user.id)
@@ -1711,6 +1882,16 @@ def list_sessions(bot_type: str | None = None, current_user: User = Depends(get_
         q = q.filter(ChatSession.bot_type == bot_type)
     rows = q.order_by(ChatSession.updated_at.desc()).limit(30).all()
     return [{"id": s.id, "bot_type": s.bot_type, "title": s.title, "updated_at": s.updated_at.isoformat(), "message_count": len(s.messages)} for s in rows]
+
+
+@app.delete("/api/chat/sessions/{session_id}")
+def delete_session(session_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sess = db.query(ChatSession).filter(ChatSession.id == session_id, ChatSession.user_id == current_user.id).first()
+    if not sess:
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+    db.delete(sess)
+    db.commit()
+    return {"deleted": True}
 
 
 @app.get("/api/chat/sessions/{session_id}/messages")
@@ -1721,21 +1902,35 @@ def get_session_messages(session_id: int, current_user: User = Depends(get_curre
     return {"session": {"id": sess.id, "bot_type": sess.bot_type, "title": sess.title}, "messages": [_serialize_msg(m) for m in sess.messages]}
 
 
+def _effective_rag_scope(payload: ChatRequest, user: User) -> str:
+    if not payload.use_personal_notes or not user.consent_rag_personal:
+        return "institutional"
+    return payload.source_scope
+
+
 @app.post("/api/chat/message")
 def chat_message(payload: ChatRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     sess = _get_or_create_session(db, current_user, payload.bot_type, payload.session_id, payload.message)
     db.add(ChatMessage(session_id=sess.id, role="user", content=payload.message.strip()))
     db.commit()
-    allow_personal = bool(payload.use_personal_notes and current_user.consent_rag_personal)
-    hits, latency_ms = retrieve_hybrid(db, current_user.id, payload.message, payload.bot_type, allow_personal, top_k=4)
+    scope = _effective_rag_scope(payload, current_user)
+    hits, latency_ms, corpus_scanned = retrieve_hybrid(db, current_user.id, payload.message, payload.bot_type, scope, top_k=4)
     reply, chips, provider = generate_chat_reply(db, current_user, payload.bot_type, payload.message, hits)
-    citations = [{k: h[k] for k in ("chunk_id", "title", "source_type", "course_code", "score", "excerpt")} for h in hits]
-    bot_msg = ChatMessage(session_id=sess.id, role="assistant", content=reply, citations_json=json.dumps(citations), action_chips_json=json.dumps(chips))
+    citations = [{k: h[k] for k in ("chunk_id", "title", "source_type", "course_code", "score", "bm25_score", "cosine_score", "excerpt")} for h in hits]
+    rag_meta = {"provider": provider, "latency_ms": latency_ms, "corpus_scanned": corpus_scanned, "scope": scope}
+    bot_msg = ChatMessage(
+        session_id=sess.id,
+        role="assistant",
+        content=reply,
+        citations_json=json.dumps(citations),
+        action_chips_json=json.dumps(chips),
+        rag_meta_json=json.dumps(rag_meta),
+    )
     sess.updated_at = utcnow()
     db.add(bot_msg)
     db.commit()
     db.refresh(bot_msg)
-    return {"session_id": sess.id, "provider": provider, "latency_ms": latency_ms, "message": _serialize_msg(bot_msg)}
+    return {"session_id": sess.id, **rag_meta, "message": _serialize_msg(bot_msg)}
 
 
 @app.post("/api/chat/stream")
@@ -1743,18 +1938,26 @@ def chat_stream(payload: ChatRequest, current_user: User = Depends(get_current_u
     sess = _get_or_create_session(db, current_user, payload.bot_type, payload.session_id, payload.message)
     db.add(ChatMessage(session_id=sess.id, role="user", content=payload.message.strip()))
     db.commit()
-    allow_personal = bool(payload.use_personal_notes and current_user.consent_rag_personal)
-    hits, latency_ms = retrieve_hybrid(db, current_user.id, payload.message, payload.bot_type, allow_personal, top_k=4)
+    scope = _effective_rag_scope(payload, current_user)
+    hits, latency_ms, corpus_scanned = retrieve_hybrid(db, current_user.id, payload.message, payload.bot_type, scope, top_k=4)
     reply, chips, provider = generate_chat_reply(db, current_user, payload.bot_type, payload.message, hits)
-    citations = [{k: h[k] for k in ("chunk_id", "title", "source_type", "course_code", "score", "excerpt")} for h in hits]
-    bot_msg = ChatMessage(session_id=sess.id, role="assistant", content=reply, citations_json=json.dumps(citations), action_chips_json=json.dumps(chips))
+    citations = [{k: h[k] for k in ("chunk_id", "title", "source_type", "course_code", "score", "bm25_score", "cosine_score", "excerpt")} for h in hits]
+    rag_meta = {"provider": provider, "latency_ms": latency_ms, "corpus_scanned": corpus_scanned, "scope": scope}
+    bot_msg = ChatMessage(
+        session_id=sess.id,
+        role="assistant",
+        content=reply,
+        citations_json=json.dumps(citations),
+        action_chips_json=json.dumps(chips),
+        rag_meta_json=json.dumps(rag_meta),
+    )
     sess.updated_at = utcnow()
     db.add(bot_msg)
     db.commit()
     db.refresh(bot_msg)
 
     def gen():
-        yield f"data: {json.dumps({'type': 'meta', 'session_id': sess.id, 'message_id': bot_msg.id, 'provider': provider, 'latency_ms': latency_ms, 'citations': citations, 'action_chips': chips})}\n\n"
+        yield f"data: {json.dumps({'type': 'meta', 'session_id': sess.id, 'message_id': bot_msg.id, 'rag_meta': rag_meta, 'citations': citations, 'action_chips': chips})}\n\n"
         for chunk in stream_words(reply):
             yield f"data: {json.dumps({'type': 'token', 'token': chunk})}\n\n"
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -1804,8 +2007,10 @@ def create_note(payload: NoteCreateRequest, current_user: User = Depends(get_cur
     db.add(note)
     db.commit()
     db.refresh(note)
-    index_note(db, note)
-    return _serialize_note(note)
+    chunks_indexed = index_note(db, note)
+    out = _serialize_note(note)
+    out["chunks_indexed"] = chunks_indexed
+    return out
 
 
 @app.post("/api/notes/digitize", status_code=status.HTTP_201_CREATED)
@@ -1935,7 +2140,7 @@ def list_quizzes(current_user: User = Depends(get_current_user), db: Session = D
 
 @app.post("/api/quizzes/generate", status_code=status.HTTP_201_CREATED)
 def generate_quiz(payload: QuizGenerateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    src = None
+    src = payload.custom_text.strip() if payload.custom_text else None
     code = payload.course_code.upper()
     title = f"{payload.topic or code} Practice Quiz"
     if payload.note_id:
@@ -1949,6 +2154,16 @@ def generate_quiz(payload: QuizGenerateRequest, current_user: User = Depends(get
     db.commit()
     db.refresh(quiz)
     return _serialize_quiz(quiz)
+
+
+@app.delete("/api/quizzes/{quiz_id}")
+def delete_quiz(quiz_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    quiz = db.query(Quiz).filter(Quiz.id == quiz_id, Quiz.user_id == current_user.id).first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    db.delete(quiz)
+    db.commit()
+    return {"deleted": True}
 
 
 @app.post("/api/quizzes/{quiz_id}/submit")
@@ -2122,6 +2337,34 @@ def generate_routine(payload: RoutineGenerateRequest, current_user: User = Depen
     return _routine_summary(blocks)
 
 
+@app.post("/api/routine/blocks", status_code=status.HTTP_201_CREATED)
+def add_routine_block(payload: RoutineBlockCreateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    b = RoutineBlock(
+        user_id=current_user.id,
+        day_label="Today",
+        period=payload.period,
+        start_label=payload.start_label.strip(),
+        end_label=payload.end_label.strip(),
+        title=payload.title.strip(),
+        course_code=payload.course_code.strip().upper(),
+        category=payload.category,
+        priority=payload.priority,
+    )
+    db.add(b)
+    db.commit()
+    return _routine_summary(db.query(RoutineBlock).filter(RoutineBlock.user_id == current_user.id).order_by(RoutineBlock.id.asc()).all())
+
+
+@app.delete("/api/routine/blocks/{block_id}")
+def delete_routine_block(block_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    b = db.query(RoutineBlock).filter(RoutineBlock.id == block_id, RoutineBlock.user_id == current_user.id).first()
+    if not b:
+        raise HTTPException(status_code=404, detail="Routine block not found.")
+    db.delete(b)
+    db.commit()
+    return _routine_summary(db.query(RoutineBlock).filter(RoutineBlock.user_id == current_user.id).order_by(RoutineBlock.id.asc()).all())
+
+
 @app.patch("/api/routine/{block_id}/toggle")
 def toggle_routine(block_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     b = db.query(RoutineBlock).filter(RoutineBlock.id == block_id, RoutineBlock.user_id == current_user.id).first()
@@ -2132,7 +2375,22 @@ def toggle_routine(block_id: int, current_user: User = Depends(get_current_user)
     return _routine_summary(db.query(RoutineBlock).filter(RoutineBlock.user_id == current_user.id).order_by(RoutineBlock.id.asc()).all())
 
 
-# --- Courses & UCAM/ELMS Sync ---
+@app.post("/api/routine/sync-calendar")
+def sync_routine_to_calendar(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    blocks = db.query(RoutineBlock).filter(RoutineBlock.user_id == current_user.id, RoutineBlock.category != "break").all()
+    base = utcnow().replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    added = 0
+    for idx, b in enumerate(blocks[:5]):
+        ref = f"routine-{b.id}"
+        if not db.query(CalendarEvent).filter(CalendarEvent.user_id == current_user.id, CalendarEvent.external_ref == ref).first():
+            st = base + timedelta(hours=idx * 2)
+            db.add(CalendarEvent(user_id=current_user.id, title=b.title, event_type="study", course_code=b.course_code, start_time=st, end_time=st + timedelta(hours=1), priority=b.priority, source="routine", external_ref=ref))
+            added += 1
+    db.commit()
+    return {"added_events": added, "message": f"Pushed {added} study block(s) into your Smart Academic Calendar."}
+
+
+# --- Courses, Assignments & UCAM/ELMS Sync ---
 @app.get("/api/sync/status")
 def sync_status(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     courses = db.query(Course).filter(Course.user_id == current_user.id).order_by(Course.code.asc()).all()
@@ -2176,6 +2434,27 @@ def delete_course(course_id: int, current_user: User = Depends(get_current_user)
     return {"deleted": True}
 
 
+@app.post("/api/sync/assignments", status_code=status.HTTP_201_CREATED)
+def add_assignment(payload: AssignmentCreateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    due = ensure_utc(payload.due_at)
+    a = Assignment(user_id=current_user.id, course_code=payload.course_code.strip().upper(), title=payload.title.strip(), due_at=due, status="pending", source="manual")
+    db.add(a)
+    db.add(CalendarEvent(user_id=current_user.id, title=payload.title.strip(), event_type="assignment", course_code=payload.course_code.strip().upper(), start_time=due, end_time=due + timedelta(hours=1), priority="high", source="manual"))
+    db.commit()
+    db.refresh(a)
+    return {"id": a.id, "title": a.title}
+
+
+@app.patch("/api/sync/assignments/{assignment_id}/toggle")
+def toggle_assignment(assignment_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    a = db.query(Assignment).filter(Assignment.id == assignment_id, Assignment.user_id == current_user.id).first()
+    if not a:
+        raise HTTPException(status_code=404, detail="Assignment not found.")
+    a.status = "submitted" if a.status == "pending" else "pending"
+    db.commit()
+    return {"id": a.id, "status": a.status}
+
+
 @app.post("/api/sync/trigger")
 def trigger_sync(provider: str = "all", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if not current_user.consent_ucam_sync:
@@ -2195,7 +2474,7 @@ def list_feedback(current_user: User = Depends(get_current_user), db: Session = 
     return {
         "average_rating": avg,
         "total_count": len(entries),
-        "entries": [{"id": e.id, "author_name": e.author_name, "rating": e.rating, "category": e.category, "message": e.message, "status": e.status, "upvotes": e.upvotes, "upvoted_by_me": e.id in mine, "created_at": e.created_at.isoformat()} for e in entries],
+        "entries": [{"id": e.id, "user_id": e.user_id, "author_name": e.author_name, "rating": e.rating, "category": e.category, "message": e.message, "status": e.status, "upvotes": e.upvotes, "upvoted_by_me": e.id in mine, "is_mine": e.user_id == current_user.id, "created_at": e.created_at.isoformat()} for e in entries],
     }
 
 
@@ -2209,6 +2488,16 @@ def submit_feedback(payload: FeedbackCreateRequest, current_user: User = Depends
     db.add(Notification(user_id=current_user.id, title="Feedback Received", message=f"Thanks for submitting your {payload.category} feedback ({payload.rating}/5).", category="feedback", action_route="feedback"))
     db.commit()
     return {"id": entry.id, "message": "Feedback submitted successfully!"}
+
+
+@app.delete("/api/feedback/{feedback_id}")
+def delete_feedback(feedback_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    entry = db.query(FeedbackEntry).filter(FeedbackEntry.id == feedback_id, FeedbackEntry.user_id == current_user.id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Feedback not found.")
+    db.delete(entry)
+    db.commit()
+    return {"deleted": True}
 
 
 @app.post("/api/feedback/{feedback_id}/upvote")
@@ -2243,7 +2532,7 @@ def read_all_notifications(current_user: User = Depends(get_current_user), db: S
     return {"marked_all_read": True}
 
 
-# --- Student Analytics (Real DB Computations) ---
+# --- Student Analytics ---
 @app.get("/api/analytics/overview")
 def analytics_overview(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     notes_count = db.query(Note).filter(Note.user_id == current_user.id).count()
@@ -2270,13 +2559,13 @@ def analytics_overview(current_user: User = Depends(get_current_user), db: Sessi
     if upcoming_count:
         recs.append(f"You have {upcoming_count} active upcoming deadline(s) in your Smart Calendar.")
     if notes_count == 0:
-        recs.append("Upload or write your first course note in Notes Digitizer to unlock grounded AI Q&A and quizzes.")
+        recs.append("Upload or write your first course note in Notes Digitizer to unlock grounded RAG Q&A and quizzes.")
     if not recs:
         recs.append("Your workspace is on track. Generate a timed quiz to keep testing recall.")
 
     today_label = utcnow().strftime("%a")
     weekly_study = [
-        {"day": d, "hours": round(completed_blocks * 0.75 + len(attempts) * 0.5, 1) if d == today_label else 0.0, "quizzes": len(attempts) if d == today_label else 0, "tasks": sum(1 for e in events if e.completed) if d == today_label else 0}
+        {"day": d, "hours": round(completed_blocks * 0.75 + len(attempts) * 0.5 + notes_count * 0.25, 1) if d == today_label else 0.0, "quizzes": len(attempts) if d == today_label else 0, "tasks": sum(1 for e in events if e.completed) if d == today_label else 0}
         for d in ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
     ]
 
@@ -2308,7 +2597,7 @@ def export_analytics_csv(current_user: User = Depends(get_current_user), db: Ses
     return Response(content=buf.getvalue().encode("utf-8"), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="edusmart-study-report.csv"'})
 
 
-# --- RBAC Admin Console (100% Real Live Database Metrics) ---
+# --- RBAC Admin Console ---
 @app.get("/api/admin/overview")
 def admin_overview(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     total_users = db.query(User).count()
@@ -2334,11 +2623,8 @@ def admin_overview(admin: User = Depends(require_admin), db: Session = Depends(g
         {"name": "Quiz Generator", "value": round((total_quizzes / activity_total) * 100, 1), "color": "#A855F7"},
         {"name": "Routine Planner", "value": round((total_routine / activity_total) * 100, 1), "color": "#3B82F6"},
     ]
-
     cur_month = utcnow().strftime("%b")
-    user_growth = [
-        {"month": cur_month, "total": total_users, "active": active_users},
-    ]
+    user_growth = [{"month": cur_month, "total": total_users, "active": active_users}]
 
     return {
         "kpis": {
@@ -2367,6 +2653,24 @@ def admin_overview(admin: User = Depends(require_admin), db: Session = Depends(g
         "user_growth": user_growth,
         "feature_usages": feature_usages,
     }
+
+
+@app.get("/api/admin/telemetry")
+def admin_telemetry(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    rows = db.query(RagTelemetry).order_by(RagTelemetry.created_at.desc()).limit(30).all()
+    return [
+        {
+            "id": r.id,
+            "bot_type": r.bot_type,
+            "query_preview": r.query_preview,
+            "hits_count": r.hits_count,
+            "hit_at_1": r.hit_at_1,
+            "latency_ms": r.latency_ms,
+            "provider": r.provider,
+            "created_at": r.created_at.isoformat(),
+        }
+        for r in rows
+    ]
 
 
 @app.get("/api/admin/users")
@@ -2406,6 +2710,18 @@ def admin_publish_doc(payload: InstitutionalDocCreateRequest, admin: User = Depe
     chunks = index_institutional_doc(db, doc)
     record_audit(db, action="admin.rag_content_published", actor=admin, target=doc.title, details=f"Indexed {chunks} chunks")
     return {"id": doc.id, "title": doc.title, "chunks_indexed": chunks}
+
+
+@app.delete("/api/admin/content/{doc_id}")
+def admin_delete_doc(doc_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    doc = db.get(InstitutionalDoc, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    purged = db.query(RagChunk).filter(RagChunk.institutional_doc_id == doc.id).delete()
+    db.delete(doc)
+    db.commit()
+    record_audit(db, action="admin.rag_content_deleted", actor=admin, target=doc.title, details=f"Purged {purged} chunks")
+    return {"deleted": True, "purged_chunks": purged}
 
 
 @app.get("/api/admin/feedback")

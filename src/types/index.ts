@@ -21,9 +21,11 @@ export interface User {
 export interface Citation {
   chunk_id: number;
   title: string;
-  source_type: string;
+  source_type?: string;
   course_code: string;
   score: number;
+  bm25_score?: number;
+  cosine_score?: number;
   excerpt: string;
 }
 
@@ -33,12 +35,20 @@ export interface ActionChip {
   payload: Record<string, string>;
 }
 
+export interface RagMeta {
+  provider?: string;
+  latency_ms?: number;
+  corpus_scanned?: number;
+  scope?: string;
+}
+
 export interface ChatMessage {
   id: number;
   role: "user" | "assistant";
   content: string;
   citations: Citation[];
   action_chips: ActionChip[];
+  rag_meta?: RagMeta;
   created_at: string;
 }
 

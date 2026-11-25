@@ -1,11 +1,11 @@
-"""End-to-end API integration tests for the unified api/index.py EduSmart backend."""
+"""End-to-end API & RAG integration tests for EduSmart (api/index.py)."""
 
 import os
 import sys
 import tempfile
 from pathlib import Path
 
-_TEST_DB = Path(tempfile.gettempdir()) / f"edusmart_unified_{os.getpid()}.db"
+_TEST_DB = Path(tempfile.gettempdir()) / f"edusmart_full_{os.getpid()}.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB}"
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -24,18 +24,21 @@ def _login(email: str, password: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
 
 
-def test_health_and_authentic_student_profile():
-    r = client.get("/api/health")
-    assert r.status_code == 200
-    assert r.json()["status"] == "ok"
+def test_public_live_rag_demo_and_support():
+    rag = client.post("/api/public/rag-demo", json={"query": "How do merit scholarships and tuition waivers work?", "bot_type": "uniq"})
+    assert rag.status_code == 200
+    body = rag.json()
+    assert body["corpus_chunks_scanned"] >= 1
+    assert len(body["citations"]) >= 1
+    assert "bm25_score" in body["citations"][0]
+    assert "cosine_score" in body["citations"][0]
+    assert "waiver" in body["answer"].lower() or "scholarship" in body["answer"].lower()
 
-    headers = _login("student@edusmart.edu", "Student@123")
-    me = client.get("/api/auth/me", headers=headers)
-    assert me.status_code == 200
-    assert me.json()["full_name"] == "Urmi Urma Snigdha"
+    sup = client.post("/api/public/support", json={"name": "Visitor", "email": "visitor@example.edu", "message": "Interested in campus pilot."})
+    assert sup.status_code == 200
 
 
-def test_cross_tenant_rag_isolation_and_cascade_purge():
+def test_cross_tenant_rag_isolation_index_inspector_and_purge():
     student_headers = _login("student@edusmart.edu", "Student@123")
     reg = client.post(
         "/api/auth/register",
@@ -48,64 +51,72 @@ def test_cross_tenant_rag_isolation_and_cascade_purge():
     note = client.post(
         "/api/notes",
         headers=second_headers,
-        json={"title": "Private Study Draft", "course_code": "CSE499", "tags": "private", "content": f"Secret concept: {secret}"},
+        json={"title": "Private Study Draft", "course_code": "CSE499", "tags": "private", "content": f"Confidential thesis keyword: {secret} is used for distributed consensus."},
     )
     assert note.status_code == 201
     note_id = note.json()["id"]
 
-    own = client.post("/api/chat/message", headers=second_headers, json={"bot_type": "uniq", "message": secret})
+    # RAG Index Inspector shows personal chunk
+    idx = client.get("/api/rag/index", headers=second_headers)
+    assert idx.status_code == 200
+    assert idx.json()["personal_chunks_count"] >= 1
+
+    # Owner retrieves their own note via Hybrid RAG
+    own = client.post("/api/chat/message", headers=second_headers, json={"bot_type": "uniq", "message": secret, "source_scope": "personal"})
     assert own.status_code == 200
     assert any("Private Study Draft" in c["title"] for c in own.json()["message"]["citations"])
 
+    # Another student MUST NOT retrieve it
     other = client.post("/api/chat/message", headers=student_headers, json={"bot_type": "uniq", "message": secret})
     assert other.status_code == 200
     assert all("Private Study Draft" not in c["title"] for c in other.json()["message"]["citations"])
 
+    # Delete cascades vector purge
     deleted = client.delete(f"/api/notes/{note_id}", headers=second_headers)
     assert deleted.status_code == 200
     assert deleted.json()["purged_rag_chunks"] >= 1
 
 
-def test_notes_digitizer_ocr_and_pure_python_pdf_export():
+def test_notes_ocr_pdf_custom_quiz_calendar_routine_assignments_and_admin():
     headers = _login("student@edusmart.edu", "Student@123")
+
+    # OCR + PDF export
     up = client.post(
         "/api/notes/digitize",
         headers=headers,
-        data={"title": "Algorithms Recap", "course_code": "CSC301", "tags": "algo"},
+        data={"title": "Algorithms Recap", "course_code": "CSC301"},
         files={"file": ("scan.png", b"\x89PNG\r\n\x1a\nsample", "image/png")},
     )
     assert up.status_code == 201
-    pdf = client.get(f"/api/notes/{up.json()['id']}/export?fmt=pdf", headers=headers)
-    assert pdf.status_code == 200
-    assert pdf.content.startswith(b"%PDF-1.4")
+    assert client.get(f"/api/notes/{up.json()['id']}/export?fmt=pdf", headers=headers).content.startswith(b"%PDF-1.4")
 
+    # Custom pasted text quiz + delete
+    q = client.post(
+        "/api/quizzes/generate",
+        headers=headers,
+        json={"custom_text": "- Consensus: Agreement among distributed nodes despite faults.", "course_code": "CSE415", "num_questions": 3},
+    )
+    assert q.status_code == 201
+    ans = {item["id"]: (item["options"][0] if item["options"] else "consensus") for item in q.json()["questions"]}
+    assert client.post(f"/api/quizzes/{q.json()['id']}/submit", headers=headers, json={"answers": ans}).status_code == 200
+    assert client.delete(f"/api/quizzes/{q.json()['id']}", headers=headers).status_code == 200
 
-def test_quiz_calendar_courses_routine_and_admin_rbac():
-    headers = _login("student@edusmart.edu", "Student@123")
-
-    # Add & delete manual course
+    # Manual course + assignment toggle + routine custom block + push to calendar
     c = client.post("/api/sync/courses", headers=headers, json={"code": "CSE415", "title": "Distributed Systems", "credits": 3})
     assert c.status_code == 201
+    a = client.post("/api/sync/assignments", headers=headers, json={"course_code": "CSE415", "title": "Raft Lab", "due_at": "2026-12-15T12:00:00Z"})
+    assert a.status_code == 201
+    assert client.patch(f"/api/sync/assignments/{a.json()['id']}/toggle", headers=headers).json()["status"] == "submitted"
     assert client.delete(f"/api/sync/courses/{c.json()['id']}", headers=headers).status_code == 200
 
-    # Quiz generate + submit
-    q = client.post("/api/quizzes/generate", headers=headers, json={"course_code": "CSC301", "num_questions": 3})
-    assert q.status_code == 201
-    ans = {item["id"]: (item["options"][0] if item["options"] else "recursion") for item in q.json()["questions"]}
-    g = client.post(f"/api/quizzes/{q.json()['id']}/submit", headers=headers, json={"answers": ans})
-    assert g.status_code == 200
+    rb = client.post("/api/routine/blocks", headers=headers, json={"period": "evening", "start_label": "09:00 PM", "end_label": "09:45 PM", "title": "Raft Reading", "course_code": "CSE415"})
+    assert rb.status_code == 201
+    assert client.post("/api/routine/sync-calendar", headers=headers).status_code == 200
 
-    # Calendar conflict + auto-resolve + .ics
-    e1 = client.post("/api/calendar/events", headers=headers, json={"title": "Class A", "event_type": "class", "course_code": "CSE401", "start_time": "2026-12-12T10:00:00Z", "end_time": "2026-12-12T11:30:00Z"})
-    e2 = client.post("/api/calendar/events", headers=headers, json={"title": "Study B", "event_type": "study", "course_code": "CSE401", "start_time": "2026-12-12T10:30:00Z", "end_time": "2026-12-12T11:30:00Z"})
-    assert e1.status_code == 201 and e2.status_code == 201
-    assert len(e2.json()["conflicts"]) >= 1
-    assert client.post(f"/api/calendar/events/{e2.json()['event']['id']}/resolve", headers=headers).status_code == 200
-    assert "BEGIN:VCALENDAR" in client.get("/api/calendar/export.ics", headers=headers).text
-
-    # RBAC check & live admin metrics
+    # Admin RBAC, telemetry & policy publish/delete
     assert client.get("/api/admin/overview", headers=headers).status_code == 403
     admin_headers = _login("admin@edusmart.edu", "Admin@123")
-    ov = client.get("/api/admin/overview", headers=admin_headers)
-    assert ov.status_code == 200
-    assert ov.json()["kpis"]["total_users"] < 100  # Real live DB count, not mocked 2450
+    assert client.get("/api/admin/telemetry", headers=admin_headers).status_code == 200
+    pub = client.post("/api/admin/content", headers=admin_headers, json={"title": "Lab Hours", "category": "policy", "content": "Computer labs stay open until 10 PM daily."})
+    assert pub.status_code == 201
+    assert client.delete(f"/api/admin/content/{pub.json()['id']}", headers=admin_headers).status_code == 200

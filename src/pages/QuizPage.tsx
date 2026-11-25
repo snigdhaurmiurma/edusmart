@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Award, BookOpen, CheckCircle2, Clock, Sparkles, XCircle } from "lucide-react";
+import { Award, BookOpen, CheckCircle2, Clock, Sparkles, Trash2, XCircle } from "lucide-react";
 
 import { apiRequest } from "../lib/api";
 import type { NoteItem, QuizAttemptSummary, QuizGradeResult, QuizItem } from "../types";
@@ -9,6 +9,7 @@ export const QuizPage: React.FC = () => {
   const [quizzes, setQuizzes] = useState<QuizItem[]>([]);
   const [attempts, setAttempts] = useState<QuizAttemptSummary[]>([]);
   const [selectedNoteId, setSelectedNoteId] = useState<string>("");
+  const [customText, setCustomText] = useState("");
   const [topic, setTopic] = useState("Dynamic Programming & Graphs");
   const [courseCode, setCourseCode] = useState("CSC301");
   const [numQuestions, setNumQuestions] = useState(5);
@@ -35,9 +36,25 @@ export const QuizPage: React.FC = () => {
     loadData();
   }, []);
 
+  const handleSubmitQuiz = async () => {
+    if (!activeQuiz) return;
+    const elapsed = activeQuiz.timed_minutes && secondsLeft !== null ? activeQuiz.timed_minutes * 60 - secondsLeft : 90;
+    const result = await apiRequest<QuizGradeResult>(`/api/quizzes/${activeQuiz.id}/submit`, {
+      method: "POST",
+      body: JSON.stringify({ answers, duration_seconds: Math.max(10, elapsed) }),
+    });
+    setGradeResult(result);
+    setSecondsLeft(null);
+    loadData();
+  };
+
   useEffect(() => {
-    if (secondsLeft === null || secondsLeft <= 0 || gradeResult) return;
-    const id = setTimeout(() => setSecondsLeft((s) => (s ? s - 1 : 0)), 1000);
+    if (secondsLeft === null || gradeResult) return;
+    if (secondsLeft <= 0) {
+      handleSubmitQuiz();
+      return;
+    }
+    const id = setTimeout(() => setSecondsLeft((s) => (s !== null ? s - 1 : null)), 1000);
     return () => clearTimeout(id);
   }, [secondsLeft, gradeResult]);
 
@@ -50,6 +67,7 @@ export const QuizPage: React.FC = () => {
         method: "POST",
         body: JSON.stringify({
           note_id: selectedNoteId ? Number(selectedNoteId) : null,
+          custom_text: !selectedNoteId && customText.trim() ? customText.trim() : null,
           topic,
           course_code: courseCode,
           num_questions: numQuestions,
@@ -66,14 +84,9 @@ export const QuizPage: React.FC = () => {
     }
   };
 
-  const handleSubmitQuiz = async () => {
-    if (!activeQuiz) return;
-    const elapsed = activeQuiz.timed_minutes && secondsLeft !== null ? activeQuiz.timed_minutes * 60 - secondsLeft : 90;
-    const result = await apiRequest<QuizGradeResult>(`/api/quizzes/${activeQuiz.id}/submit`, {
-      method: "POST",
-      body: JSON.stringify({ answers, duration_seconds: Math.max(10, elapsed) }),
-    });
-    setGradeResult(result);
+  const deleteQuiz = async (id: number) => {
+    await apiRequest(`/api/quizzes/${id}`, { method: "DELETE" });
+    if (activeQuiz?.id === id) setActiveQuiz(null);
     loadData();
   };
 
@@ -82,68 +95,70 @@ export const QuizPage: React.FC = () => {
       <div style={{ marginBottom: 20 }}>
         <h1 style={{ fontSize: "1.65rem" }}>AI-Powered Quiz Generator</h1>
         <p style={{ margin: "4px 0 0", color: "var(--text-secondary)", fontSize: "0.9rem" }}>
-          Generate grounded MCQs and short-answer practice exams from your digitized notes, track mastery, and surface weak areas.
+          Generate grounded MCQs and short-answer practice exams from digitized notes or pasted text with auto-timed submission.
         </p>
       </div>
 
       <div className="card" style={{ marginBottom: 20 }}>
-        <form onSubmit={handleGenerate} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, alignItems: "end" }}>
-          <div>
-            <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 700, marginBottom: 5 }}>
-              Source Digitized Note (optional)
-            </label>
-            <select className="select" value={selectedNoteId} onChange={(e) => setSelectedNoteId(e.target.value)}>
-              <option value="">Use Course / Topic Bank</option>
-              {notes.map((n) => (
-                <option key={n.id} value={n.id}>
-                  [{n.course_code}] {n.title}
-                </option>
-              ))}
-            </select>
+        <form onSubmit={handleGenerate} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, alignItems: "end" }}>
+            <div>
+              <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 700, marginBottom: 4 }}>Digitized Note Source</label>
+              <select className="select" value={selectedNoteId} onChange={(e) => setSelectedNoteId(e.target.value)}>
+                <option value="">Custom Text / Topic Bank</option>
+                {notes.map((n) => (
+                  <option key={n.id} value={n.id}>[{n.course_code}] {n.title}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 700, marginBottom: 4 }}>Topic</label>
+              <input className="input" value={topic} onChange={(e) => setTopic(e.target.value)} />
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 700, marginBottom: 4 }}>Course</label>
+              <input className="input" value={courseCode} onChange={(e) => setCourseCode(e.target.value.toUpperCase())} />
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 700, marginBottom: 4 }}>Questions</label>
+              <select className="select" value={numQuestions} onChange={(e) => setNumQuestions(Number(e.target.value))}>
+                {[3, 4, 5, 6, 8].map((n) => (<option key={n} value={n}>{n} Questions</option>))}
+              </select>
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 700, marginBottom: 4 }}>Difficulty</label>
+              <select className="select" value={difficulty} onChange={(e) => setDifficulty(e.target.value)}>
+                <option value="easy">Easy</option>
+                <option value="medium">Medium</option>
+                <option value="hard">Hard</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 700, marginBottom: 4 }}>Timer (min)</label>
+              <input className="input" type="number" min={0} max={60} value={timedMinutes} onChange={(e) => setTimedMinutes(Number(e.target.value))} />
+            </div>
           </div>
-          <div>
-            <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 700, marginBottom: 5 }}>Topic</label>
-            <input className="input" value={topic} onChange={(e) => setTopic(e.target.value)} />
-          </div>
-          <div>
-            <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 700, marginBottom: 5 }}>Course</label>
-            <input className="input" value={courseCode} onChange={(e) => setCourseCode(e.target.value.toUpperCase())} />
-          </div>
-          <div>
-            <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 700, marginBottom: 5 }}>Questions</label>
-            <select className="select" value={numQuestions} onChange={(e) => setNumQuestions(Number(e.target.value))}>
-              {[3, 4, 5, 6, 8].map((n) => (
-                <option key={n} value={n}>{n} Questions</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 700, marginBottom: 5 }}>Difficulty</label>
-            <select className="select" value={difficulty} onChange={(e) => setDifficulty(e.target.value)}>
-              <option value="easy">Easy</option>
-              <option value="medium">Medium</option>
-              <option value="hard">Hard</option>
-            </select>
-          </div>
-          <div>
-            <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 700, marginBottom: 5 }}>Timer (min)</label>
-            <input
-              className="input"
-              type="number"
-              min={0}
-              max={60}
-              value={timedMinutes}
-              onChange={(e) => setTimedMinutes(Number(e.target.value))}
+
+          {!selectedNoteId && (
+            <textarea
+              className="textarea"
+              rows={2}
+              placeholder="(Optional) Paste any lecture bullets or definitions here to generate custom grounded questions..."
+              value={customText}
+              onChange={(e) => setCustomText(e.target.value)}
             />
+          )}
+
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button type="submit" className="btn btn-gradient" disabled={generating}>
+              <Sparkles size={16} /> {generating ? "Generating..." : "Generate Practice Quiz"}
+            </button>
           </div>
-          <button type="submit" className="btn btn-gradient" disabled={generating}>
-            <Sparkles size={16} /> {generating ? "Generating..." : "Generate Quiz"}
-          </button>
         </form>
       </div>
 
       {activeQuiz && !gradeResult && (
-        <div className="card" style={{ marginBottom: 20 }}>
+        <div className="card anim-fade-up" style={{ marginBottom: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
             <div>
               <span className="badge badge-purple">{activeQuiz.course_code} • {activeQuiz.difficulty}</span>
@@ -156,7 +171,7 @@ export const QuizPage: React.FC = () => {
             )}
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             {activeQuiz.questions.map((q, idx) => (
               <div key={q.id} style={{ padding: 16, borderRadius: 12, background: "var(--bg-subtle)" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
@@ -180,39 +195,26 @@ export const QuizPage: React.FC = () => {
                           fontSize: "0.9rem",
                         }}
                       >
-                        <input
-                          type="radio"
-                          name={q.id}
-                          checked={answers[q.id] === opt}
-                          onChange={() => setAnswers((prev) => ({ ...prev, [q.id]: opt }))}
-                        />
+                        <input type="radio" name={q.id} checked={answers[q.id] === opt} onChange={() => setAnswers((prev) => ({ ...prev, [q.id]: opt }))} />
                         <span>{opt}</span>
                       </label>
                     ))}
                   </div>
                 ) : (
-                  <input
-                    className="input"
-                    style={{ marginTop: 8, background: "var(--bg-card)" }}
-                    placeholder="Type your short answer..."
-                    value={answers[q.id] || ""}
-                    onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
-                  />
+                  <input className="input" style={{ marginTop: 8, background: "var(--bg-card)" }} placeholder="Type your short answer..." value={answers[q.id] || ""} onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))} />
                 )}
               </div>
             ))}
           </div>
 
           <div style={{ marginTop: 18, display: "flex", justifyContent: "flex-end" }}>
-            <button className="btn btn-gradient" onClick={handleSubmitQuiz}>
-              Submit &amp; Grade Quiz
-            </button>
+            <button className="btn btn-gradient" onClick={handleSubmitQuiz}>Submit &amp; Grade Quiz</button>
           </div>
         </div>
       )}
 
       {gradeResult && (
-        <div className="card" style={{ marginBottom: 20 }}>
+        <div className="card anim-fade-up" style={{ marginBottom: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
             <div>
               <h2 style={{ fontSize: "1.35rem" }}>{gradeResult.quiz_title} — Results</h2>
@@ -220,30 +222,18 @@ export const QuizPage: React.FC = () => {
                 Score: <strong>{gradeResult.score_percent}%</strong> ({gradeResult.correct_count}/{gradeResult.total_questions} correct)
               </p>
             </div>
-            <button className="btn btn-white btn-sm" onClick={() => setGradeResult(null)}>
-              Take Another Quiz
-            </button>
+            <button className="btn btn-white btn-sm" onClick={() => setGradeResult(null)}>Take Another Quiz</button>
           </div>
 
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
             {Object.entries(gradeResult.topic_breakdown).map(([t, pct]) => (
-              <span key={t} className={`badge ${pct >= 70 ? "badge-green" : "badge-red"}`}>
-                {t}: {pct}%
-              </span>
+              <span key={t} className={`badge ${pct >= 70 ? "badge-green" : "badge-red"}`}>{t}: {pct}%</span>
             ))}
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {gradeResult.results.map((r, i) => (
-              <div
-                key={r.id}
-                style={{
-                  padding: 14,
-                  borderRadius: 12,
-                  background: r.is_correct ? "var(--green-bg)" : "var(--pink-bg)",
-                  borderLeft: `4px solid ${r.is_correct ? "#22c55e" : "#ef4444"}`,
-                }}
-              >
+              <div key={r.id} style={{ padding: 14, borderRadius: 12, background: r.is_correct ? "var(--green-bg)" : "var(--pink-bg)", borderLeft: `4px solid ${r.is_correct ? "#22c55e" : "#ef4444"}` }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700 }}>
                   {r.is_correct ? <CheckCircle2 size={17} color="#16a34a" /> : <XCircle size={17} color="#dc2626" />}
                   <span>Q{i + 1}: {r.prompt}</span>
@@ -251,9 +241,7 @@ export const QuizPage: React.FC = () => {
                 <div style={{ fontSize: "0.86rem", marginTop: 6 }}>
                   Your answer: <strong>{r.your_answer || "(blank)"}</strong> | Correct: <strong>{r.correct_answer}</strong>
                 </div>
-                <div style={{ fontSize: "0.84rem", color: "var(--text-secondary)", marginTop: 4 }}>
-                  {r.explanation}
-                </div>
+                <div style={{ fontSize: "0.84rem", color: "var(--text-secondary)", marginTop: 4 }}>{r.explanation}</div>
               </div>
             ))}
           </div>
@@ -262,34 +250,37 @@ export const QuizPage: React.FC = () => {
 
       <div className="grid-2">
         <div className="card">
-          <h3 style={{ fontSize: "1.05rem", marginBottom: 12 }}>Saved Quizzes</h3>
+          <h3 style={{ fontSize: "1.05rem", marginBottom: 12 }}>Saved Quizzes ({quizzes.length})</h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {quizzes.map((q) => (
-              <div key={q.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: 12, borderRadius: 10, background: "var(--bg-subtle)" }}>
+              <div key={q.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: 12, borderRadius: 10, background: "var(--bg-subtle)" }}>
                 <div>
-                  <div style={{ fontWeight: 700, fontSize: "0.92rem" }}>{q.title}</div>
-                  <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
-                    {q.course_code} • {q.questions.length} questions • {q.difficulty}
-                  </div>
+                  <div style={{ fontWeight: 700, fontSize: "0.9rem" }}>{q.title}</div>
+                  <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>{q.course_code} • {q.questions.length} Qs • {q.difficulty}</div>
                 </div>
-                <button
-                  className="btn btn-white btn-sm"
-                  onClick={() => {
-                    setActiveQuiz(q);
-                    setAnswers({});
-                    setGradeResult(null);
-                    setSecondsLeft(q.timed_minutes ? q.timed_minutes * 60 : null);
-                  }}
-                >
-                  <BookOpen size={14} /> Practice
-                </button>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button
+                    className="btn btn-white btn-sm"
+                    onClick={() => {
+                      setActiveQuiz(q);
+                      setAnswers({});
+                      setGradeResult(null);
+                      setSecondsLeft(q.timed_minutes ? q.timed_minutes * 60 : null);
+                    }}
+                  >
+                    <BookOpen size={14} /> Practice
+                  </button>
+                  <button className="icon-btn" onClick={() => deleteQuiz(q.id)} aria-label="Delete quiz">
+                    <Trash2 size={14} color="#dc2626" />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
         </div>
 
         <div className="card">
-          <h3 style={{ fontSize: "1.05rem", marginBottom: 12 }}>Recent Quiz Attempts</h3>
+          <h3 style={{ fontSize: "1.05rem", marginBottom: 12 }}>Recent Attempts ({attempts.length})</h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {attempts.map((a) => (
               <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: 12, borderRadius: 10, background: "var(--bg-subtle)" }}>
@@ -297,14 +288,10 @@ export const QuizPage: React.FC = () => {
                   <Award size={18} color={a.score_percent >= 75 ? "#16a34a" : "#d97706"} />
                   <div>
                     <div style={{ fontWeight: 700, fontSize: "0.9rem" }}>{a.course_code}</div>
-                    <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
-                      {a.correct_count}/{a.total_questions} correct • {new Date(a.created_at).toLocaleDateString()}
-                    </div>
+                    <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>{a.correct_count}/{a.total_questions} correct • {new Date(a.created_at).toLocaleDateString()}</div>
                   </div>
                 </div>
-                <span className={`badge ${a.score_percent >= 75 ? "badge-green" : "badge-amber"}`}>
-                  {a.score_percent}%
-                </span>
+                <span className={`badge ${a.score_percent >= 75 ? "badge-green" : "badge-amber"}`}>{a.score_percent}%</span>
               </div>
             ))}
           </div>

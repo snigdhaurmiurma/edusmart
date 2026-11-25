@@ -903,3 +903,187 @@ select {
     padding: 20px 16px 40px;
   }
 }
+
+/* ---------- Smooth Animations, Interactive Landing & Calendar Grid ---------- */
+html {
+  scroll-behavior: smooth;
+}
+
+@keyframes fadeSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes floatSlow {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-9px);
+  }
+}
+
+@keyframes pulseSoft {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(123, 47, 247, 0.28);
+  }
+  50% {
+    box-shadow: 0 0 0 10px rgba(123, 47, 247, 0);
+  }
+}
+
+.anim-fade-up {
+  animation: fadeSlideUp 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.anim-delay-1 {
+  animation-delay: 0.08s;
+}
+
+.anim-delay-2 {
+  animation-delay: 0.16s;
+}
+
+.anim-float {
+  animation: floatSlow 5.5s ease-in-out infinite;
+}
+
+.sticky-landing-nav {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: rgba(244, 245, 251, 0.84);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid rgba(29, 85, 196, 0.08);
+  transition: box-shadow 0.25s ease;
+}
+
+[data-theme="dark"] .sticky-landing-nav {
+  background: rgba(13, 19, 34, 0.86);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.module-card-interactive {
+  cursor: pointer;
+  position: relative;
+  border: 2px solid var(--border-subtle);
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.22s ease, border-color 0.2s ease;
+}
+
+.module-card-interactive:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 16px 32px rgba(70, 38, 168, 0.14);
+}
+
+.module-card-interactive.selected {
+  border-color: var(--brand-purple);
+  box-shadow: 0 14px 34px rgba(123, 47, 247, 0.2);
+}
+
+.rag-score-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border-subtle);
+  overflow: hidden;
+  flex: 1;
+}
+
+.rag-score-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--grad-cta);
+  transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.faq-item {
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  background: var(--bg-card);
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.faq-item.open {
+  border-color: var(--brand-purple);
+  box-shadow: var(--shadow-sm);
+}
+
+.faq-trigger {
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 16px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.dropzone {
+  border: 2px dashed var(--border-strong);
+  border-radius: 14px;
+  padding: 20px;
+  text-align: center;
+  background: var(--bg-subtle);
+  transition: border-color 0.2s ease, background 0.2s ease;
+  cursor: pointer;
+}
+
+.dropzone.dragging,
+.dropzone:hover {
+  border-color: var(--brand-purple);
+  background: rgba(123, 47, 247, 0.06);
+}
+
+.cal-month-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cal-day-cell {
+  min-height: 92px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 8px;
+  background: var(--bg-card);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.cal-day-cell:hover {
+  border-color: var(--brand-purple);
+  transform: translateY(-1px);
+}
+
+.cal-day-cell.selected {
+  border-color: var(--brand-purple);
+  box-shadow: 0 0 0 2px rgba(123, 47, 247, 0.2);
+}
+
+.cal-day-cell.today {
+  background: rgba(59, 130, 246, 0.07);
+}
+
+.cal-chip {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
